@@ -669,6 +669,7 @@ struct SolutionResultView: View {
                     ForEach(Array(result.sections.enumerated()), id: \.offset) { _, section in
                         SectionView(section: section)
                     }
+                                        if !result.exports.isEmpty { ExportsCard(exports: result.exports) }
                     Card("Assumptions used") { KeyValueGrid(rows: result.assumptions) }
                 }
             }
@@ -701,13 +702,15 @@ private struct SectionView: View {
             Card(title, subtitle: subtitle.isEmpty ? nil : subtitle) {
                 BarListChart(items: items, value: { $0.value }, label: { format.format($0.value) })
             }
+
         case .notes(let title, let lines):
             Card(title) {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                        Text("• " + line).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Text(linkifiedText("• " + line)).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                .textSelection(.enabled)
             }
         }
     }

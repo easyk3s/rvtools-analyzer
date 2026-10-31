@@ -316,6 +316,16 @@ public enum SolutionSection: Sendable {
     case notes(String, [String])
 }
 
+public struct SolutionExport: Identifiable, Sendable {
+    public var id: String { fileName }
+    public let title: String
+    public let fileName: String
+    public let content: String
+    public init(title: String, fileName: String, content: String) {
+        self.title = title; self.fileName = fileName; self.content = content
+    }
+}
+
 public struct SolutionResult {
     public var headline: String
     public var sections: [SolutionSection]
@@ -325,6 +335,7 @@ public struct SolutionResult {
     public var log: [String] = []
     public var priceRefs: [PriceRef] = []
     public var failed = false
+    public var exports: [SolutionExport] = []
 
     public init(headline: String, sections: [SolutionSection]) {
         self.headline = headline
