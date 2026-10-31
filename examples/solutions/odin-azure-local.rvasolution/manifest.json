@@ -1,0 +1,239 @@
+{
+  "apiVersion": 1,
+  "id": "odin-azure-local",
+  "title": "Azure Local Sizer (ODIN)",
+  "symbol": "server.rack",
+  "summary": "Size the selected VMs onto Azure Local nodes, and open the same workloads pre-loaded in ODIN for Azure Local.",
+  "version": "1.2.0",
+  "author": "RVTools Analyzer examples",
+  "defaultSelection": "poweredOn",
+  "parameters": [
+    {
+      "id": "grouping",
+      "type": "choice",
+      "group": "Workloads",
+      "label": "ODIN workload layout",
+      "options": [
+        "One grouped workload",
+        "One workload per VM"
+      ],
+      "default": 0,
+      "help": "Grouped keeps the ODIN link short. Per-VM falls back to grouped automatically if the link would be too long."
+    },
+    {
+      "id": "rightsize",
+      "type": "toggle",
+      "group": "Right-sizing",
+      "label": "Right-size from observed usage",
+      "default": false,
+      "help": "Uses CPU and consumed memory from the export plus the buffer. RVTools is a point-in-time snapshot — validate with performance history."
+    },
+    {
+      "id": "buffer",
+      "type": "number",
+      "group": "Right-sizing",
+      "label": "Buffer",
+      "default": 25,
+      "min": 0,
+      "max": 200,
+      "unit": "%"
+    },
+    {
+      "id": "growth",
+      "type": "number",
+      "group": "Right-sizing",
+      "label": "Future growth",
+      "default": 0,
+      "min": 0,
+      "max": 200,
+      "unit": "%"
+    },
+    {
+      "id": "nodeCount",
+      "type": "choice",
+      "group": "Cluster",
+      "label": "Node count",
+      "options": [
+        "Auto (smallest that fits)",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8"
+      ],
+      "default": 0
+    },
+    {
+      "id": "resiliency",
+      "type": "choice",
+      "group": "Cluster",
+      "label": "Volume resiliency",
+      "options": [
+        "Two-way mirror",
+        "Three-way mirror"
+      ],
+      "default": 1,
+      "help": "Three-way mirror needs 3 or more nodes. Two-node rows are always evaluated with a two-way mirror."
+    },
+    {
+      "id": "nPlusOne",
+      "type": "toggle",
+      "group": "Cluster",
+      "label": "Keep one node of memory free (N+1)",
+      "default": true,
+      "help": "Memory must still fit when one node is down for patching or failure."
+    },
+    {
+      "id": "generation",
+      "type": "choice",
+      "group": "Node hardware",
+      "label": "CPU generation",
+      "options": [
+        "Intel® 4th Gen Xeon® (Sapphire Rapids)",
+        "Intel® 5th Gen Xeon® (Emerald Rapids)",
+        "Intel® 6th Gen Xeon® (Granite Rapids / Sierra Forest)",
+        "AMD 4th Gen EPYC™ (Genoa)",
+        "AMD 4th Gen EPYC™ (Bergamo, Zen 4c)",
+        "AMD 5th Gen EPYC™ (Turin)",
+        "AMD 5th Gen EPYC™ (Turin Dense, Zen 5c)",
+        "Intel® Xeon® D-2700 (Ice Lake-D)"
+      ],
+      "default": 3,
+      "help": "Same list as ODIN Sizer's CPU Manufacturer + CPU Generation dropdowns."
+    },
+    {
+      "id": "cores",
+      "type": "choice",
+      "group": "Node hardware",
+      "label": "CPU cores per socket",
+      "options": [
+        "4 cores",
+        "8 cores",
+        "10 cores",
+        "12 cores",
+        "16 cores",
+        "18 cores",
+        "20 cores",
+        "24 cores",
+        "28 cores",
+        "32 cores",
+        "36 cores",
+        "40 cores",
+        "44 cores",
+        "48 cores",
+        "52 cores",
+        "56 cores",
+        "60 cores",
+        "64 cores",
+        "72 cores",
+        "80 cores",
+        "84 cores",
+        "86 cores",
+        "96 cores",
+        "112 cores",
+        "128 cores",
+        "144 cores",
+        "160 cores",
+        "172 cores",
+        "192 cores"
+      ],
+      "default": 7,
+      "help": "ODIN offers a different list for each generation: Intel® 4th Gen Xeon® (Sapphire Rapids): 8, 12, 16, 24, 32, 40, 48, 56, 60; Intel® 5th Gen Xeon® (Emerald Rapids): 8, 10, 12, 16, 18, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 80, 96, 128; Intel® 6th Gen Xeon® (Granite Rapids / Sierra Forest): 8, 12, 16, 24, 32, 36, 48, 64, 72, 80, 86, 96, 128, 144, 172; AMD 4th Gen EPYC™ (Genoa): 8, 16, 24, 32, 48, 64, 84, 96; AMD 4th Gen EPYC™ (Bergamo, Zen 4c): 8, 16, 32, 64, 112, 128; AMD 5th Gen EPYC™ (Turin): 8, 16, 24, 32, 36, 48, 64, 72, 84, 128; AMD 5th Gen EPYC™ (Turin Dense, Zen 5c): 96, 128, 144, 160, 192; Intel® Xeon® D-2700 (Ice Lake-D): 4, 8, 10, 12, 16, 20. If the value you pick isn't offered for the selected generation, the nearest ODIN option is used and a note is shown."
+    },
+    {
+      "id": "sockets",
+      "type": "choice",
+      "group": "Node hardware",
+      "label": "CPU sockets per node",
+      "options": [
+        "1",
+        "2"
+      ],
+      "default": 0
+    },
+    {
+      "id": "memory",
+      "type": "choice",
+      "group": "Node hardware",
+      "label": "Memory per node",
+      "options": [
+        "64 GB",
+        "128 GB",
+        "192 GB",
+        "256 GB",
+        "384 GB",
+        "512 GB",
+        "768 GB",
+        "1024 GB",
+        "1536 GB",
+        "2048 GB",
+        "3072 GB",
+        "4096 GB"
+      ],
+      "default": 2,
+      "help": "Same list as ODIN Sizer's Memory per Machine dropdown (64 GB to 4 TB)."
+    },
+    {
+      "id": "vcpuRatio",
+      "type": "number",
+      "group": "Node hardware",
+      "label": "vCPU : physical core ratio",
+      "default": 4,
+      "min": 1,
+      "max": 10
+    },
+    {
+      "id": "reservedMemory",
+      "type": "number",
+      "group": "Node hardware",
+      "label": "Memory reserved for host and infrastructure",
+      "default": 32,
+      "min": 0,
+      "max": 256,
+      "unit": "GiB",
+      "help": "Local estimate only. ODIN applies its own reserve — treat ODIN as the authority."
+    },
+    {
+      "id": "diskCount",
+      "type": "number",
+      "group": "Storage",
+      "label": "Capacity disks per node (starting point)",
+      "default": 6,
+      "min": 2,
+      "max": 24
+    },
+    {
+      "id": "autoDisks",
+      "type": "toggle",
+      "group": "Storage",
+      "label": "Add capacity disks per node as needed",
+      "default": true,
+      "help": "Mirrors ODIN: when storage is the limit, grow the disk count per node (up to the maximum below) before adding nodes."
+    },
+    {
+      "id": "maxDisks",
+      "type": "number",
+      "group": "Storage",
+      "label": "Maximum capacity disks per node",
+      "default": 16,
+      "min": 2,
+      "max": 24,
+      "help": "Check this against the chassis you plan to quote."
+    },
+    {
+      "id": "diskSize",
+      "type": "choice",
+      "group": "Storage",
+      "label": "Capacity disk size (TB)",
+      "options": [
+        "1.92",
+        "3.84",
+        "7.68",
+        "15.36"
+      ],
+      "default": 1
+    }
+  ]
+}
