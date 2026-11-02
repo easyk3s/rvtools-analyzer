@@ -115,6 +115,20 @@ enum DebugSnapshot {
         }
     }
 
+    /// With snapshots on, nobody is there to answer the column sheet: images it and carries on with its matches.
+    static func runIfRequested(columnReview model: AppModel) {
+        guard let dir = ProcessInfo.processInfo.environment["RVTA_SNAPSHOT_DIR"], !dir.isEmpty else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            try? FileManager.default.createDirectory(at: URL(fileURLWithPath: dir), withIntermediateDirectories: true)
+            if let sheet = NSApp.windows.first(where: \.isSheet), let image = windowServerImage(sheet),
+               let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("00-column-mapping.png"))
+            }
+            model.finishColumnReview(model.columnReview?.plan)
+        }
+    }
+
     private static func mainWindow() -> NSWindow? {
         NSApp.windows.filter { $0.contentView != nil && $0.frame.width > 600 }.max { $0.frame.width < $1.frame.width }
     }

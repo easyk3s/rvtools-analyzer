@@ -117,12 +117,21 @@ public final class Dataset: @unchecked Sendable {
         ((rvtoolsVersion.isEmpty ? [] : ["RVTools \(rvtoolsVersion)"]) + sourceTools.map(\.label)).joined(separator: " + ")
     }
     public private(set) var warnings: [String] = []
+    /// The columns used for exports with non-standard headers.
+    public private(set) var columnPlans: [ColumnPlan] = []
+    /// What to keep with a saved project, so reopening it doesn't ask again.
+    public var columnChoices: ColumnChoices {
+        columnPlans.reduce(into: [:]) { out, plan in out.merge(plan.choices) { $0.merging($1) { a, _ in a } } }
+    }
     /// Rows skipped as already loaded, per file and tab (see `Table.merge`).
     private var duplicateRows: [String: [String: Int]] = [:]
 
     public func table(_ name: String) -> Table? { tables[name.lowercased()] }
 
-    public static func load(_ urls: [URL]) throws -> Dataset {
+    /// `reviewColumns` lets someone check the columns of an export with non-standard headers: it returns the plan to
+    /// use, or nil to stop loading (`CancellationError`). Without it, only confident matches are used. `columnChoices`
+    /// restores earlier decisions, which aren't asked about again.
+    public static func load(_ urls: [URL], columnChoices saved: ColumnChoices? = nil, reviewColumns: ((ColumnPlan) -> ColumnPlan?)? = nil) throws -> Dataset {
         let ds = Dataset()
         var fileDates: [Date] = []
         var collectorDates: [Date] = []
@@ -177,7 +186,22 @@ public final class Dataset: @unchecked Sendable {
                 ds.addSourceTool(LiveOptics.sourceTool(version: r.version))
                 if let d = r.collected { collectorDates.append(d); continue }
             } else {
-                for raw in raws where !raw.headers.isEmpty { ds.add(raw, from: file.lastPathComponent) }
+                var tables = raws.filter { !$0.headers.isEmpty }
+                if let proposed = ColumnMatcher.plan(for: tables, file: file.lastPathComponent) {
+                    let plan: ColumnPlan
+                    if let saved {
+                        plan = proposed.applying(saved)
+                    } else if let reviewColumns {
+                        guard let reviewed = reviewColumns(proposed) else { throw CancellationError() }
+                        plan = reviewed
+                    } else {
+                        plan = proposed.confidentOnly
+                    }
+                    tables = plan.apply(to: tables)
+                    ds.columnPlans.append(plan)
+                    ds.warnings.append("\(file.lastPathComponent) doesn't use RVTools' usual column names: \(Fmt.int(plan.matchedCount)) of \(Fmt.int(plan.columnCount)) columns were matched to them")
+                }
+                for raw in tables { ds.add(raw, from: file.lastPathComponent) }
             }
             if let d = Parse.dateFromExportName(file.lastPathComponent) ?? Parse.dateFromExportName(file.deletingLastPathComponent().lastPathComponent) {
                 fileDates.append(d)
@@ -190,6 +214,9 @@ public final class Dataset: @unchecked Sendable {
                 throw RVToolsError.notRVTools("This is a Nutanix Collector mapping file — open it together with the anonymized ntnxcollector export it belongs to")
             }
             throw RVToolsError.notRVTools("No vInfo tab found — this doesn't look like an RVTools, Nutanix Collector or Live Optics export (tabs found: \(ds.tableNames.joined(separator: ", ")))")
+        }
+        if let info = ds.table("vInfo"), !info.rows.isEmpty, info.col("VM") == nil {
+            ds.warnings.append("vInfo has no VM column, so its \(Fmt.int(info.rows.count)) row(s) couldn't be read as VMs")
         }
         ds.tableNames.sort { a, b in
             let ia = knownSheets.firstIndex { $0.caseInsensitiveCompare(a) == .orderedSame } ?? Int.max
