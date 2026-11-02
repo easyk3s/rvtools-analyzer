@@ -121,11 +121,19 @@ private final class Builder {
         guard let t = ds.table("vSource") else { return }
         let cServer = t.col("VI SDK Server"), cVersion = t.col("Version"), cBuild = t.col("Build"), cFull = t.col("Fullname")
         let cAPI = t.col("API version"), cOS = t.col("OS type"), cName = t.col("Name"), cUUID = t.col("VI SDK UUID")
+        // Exports with non-standard columns can leave the server out of vSource, with Name just the product name.
+        var serverByUUID: [String: String] = [:]
+        if cServer == nil {
+            for tab in ["vInfo", "vHost"] {
+                guard let other = ds.table(tab), let s = other.col("VI SDK Server"), let u = other.col("VI SDK UUID") else { continue }
+                for r in other.rows where !r.s(u).isEmpty && serverByUUID[r.s(u)] == nil { serverByUUID[r.s(u)] = r.s(s) }
+            }
+        }
         for r in t.rows {
-            let server = r.s(cServer).isEmpty ? r.s(cName) : r.s(cServer)
+            let server = r.s(cServer).isEmpty ? (serverByUUID[r.s(cUUID)] ?? r.s(cName)) : r.s(cServer)
             let i = ensureVCenter(server)
             inv.vcenters[i].fullName = r.s(cFull)
-            inv.vcenters[i].version = r.s(cVersion)
+            inv.vcenters[i].version = cVersion == nil ? (r.s(cFull).range(of: #"\d+\.\d+(\.\d+)*"#, options: .regularExpression).map { String(r.s(cFull)[$0]) } ?? "") : r.s(cVersion)
             inv.vcenters[i].build = r.s(cBuild)
             inv.vcenters[i].apiVersion = r.s(cAPI)
             inv.vcenters[i].osType = r.s(cOS)

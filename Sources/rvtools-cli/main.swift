@@ -1,7 +1,7 @@
 import Foundation
 import RVToolsCore
 
-// Headless runner: rvtools-cli <export.xlsx | csv-folder> [more exports...] [--export <dir>]
+// Headless runner: rvtools-cli <export.xlsx | csv-folder> [more exports...] [--columns] [--export <dir>]
 // Custom solutions: --list-solutions, --validate-solution <pack> [export], --solutions <dir>, --price-list <file>
 
 var args = Array(CommandLine.arguments.dropFirst())
@@ -16,6 +16,9 @@ if let i = args.firstIndex(of: "--solution"), i + 1 < args.count {
     solutionID = args[i + 1]
     args.removeSubrange(i...(i + 1))
 }
+// --columns: for an export with non-standard column names, list how each column was matched.
+let showColumns = args.contains("--columns")
+args.removeAll { $0 == "--columns" }
 // --pptx <file> [--template <file>]: with --solution, also write the results as a PowerPoint deck (optionally using a .pptx/.potx's theme and layouts).
 var pptxPath: String?, templatePath: String?
 for flag in ["--pptx", "--template"] {
@@ -264,7 +267,7 @@ if let path = decksRecipe {
 }
 
 guard !args.isEmpty else {
-    print("usage: rvtools-cli <RVTools export .xlsx | folder of RVTools_tab*.csv | project.rvaproj> [...] [--export <dir>]")
+    print("usage: rvtools-cli <RVTools export .xlsx | folder of RVTools_tab*.csv | project.rvaproj> [...] [--columns] [--export <dir>]")
     print("       [--solution <id> [--pptx <file> [--template <file>]]] [--decks <recipe> [--out <dir> | --zip <file>] [--customer <name>]] [--set name=value ...] [--select selection=vms ...] [--save-project <path>] [--trend] [--map kind:name] [--units binary|decimal] [--rate bits|bytes]")
     print("       --list-solutions | --validate-solution <pack> [export] | --solutions <dir> | --price-list <file> | --prices azure|aws")
     exit(1)
@@ -328,7 +331,7 @@ do {
         PriceLibrary.shared.setProjectLists(opened.priceLists)
         print("Project:      \(opened.project.name) (saved \(Fmt.dateTime(opened.project.modified)))")
     }
-    let ds = try Dataset.load(inputs)
+    let ds = try Dataset.load(inputs, columnChoices: project?.columnMapping)
     let t1 = Date()
     let inv = InventoryBuilder.build(ds)
     let t2 = Date()
@@ -340,6 +343,7 @@ do {
         if !ProjectFile.isProject(url) { url.appendPathExtension(ProjectFile.fileExtension) }
         var p = project ?? ProjectFile(name: url.deletingPathExtension().lastPathComponent)
         p.name = url.deletingPathExtension().lastPathComponent
+        if !ds.columnPlans.isEmpty { p.columnMapping = ds.columnChoices }
         for s in SolutionCatalog.all {
             let chosen = s.id == solutionID || validated?.id == s.id
             for (key, ids) in resolveSelections(s, r.inventory) where p.solutionSelections[key] == nil || (chosen && !selectOverrides.isEmpty) {
@@ -417,6 +421,14 @@ do {
     print("Timing:       load \(ms(t0, t1)), correlate \(ms(t1, t2)), analyze \(ms(t2, t3))")
     print("Tabs:         " + ds.tableNames.map { "\($0)=\(ds.table($0)?.rows.count ?? 0)" }.joined(separator: " "))
     for w in ds.warnings { print("Note:         \(w)") }
+    if showColumns {
+        for plan in ds.columnPlans {
+            print("\n== Columns: \(plan.file)")
+            for tab in plan.tabs {
+                for m in tab.matches where m.target != m.source { print("  \(tab.name)\t\(m.source)\t\(m.target ?? "(no match)")\t\(m.kind)") }
+            }
+        }
+    }
 
     let t = r.totals
     print("\n== Inventory")

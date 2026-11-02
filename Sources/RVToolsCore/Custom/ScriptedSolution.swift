@@ -489,7 +489,15 @@ enum ResultMapper {
                 throw ExtensionError("\(at): type must be metrics, checks, table, bars or notes")
             }
         }
-        return SolutionResult(headline: v["headline"]?.text ?? solution.title, sections: out)
+                var result = SolutionResult(headline: v["headline"]?.text ?? solution.title, sections: out)
+        result.exports = try list(v["exports"], "exports").enumerated().map { j, e -> SolutionExport in
+            guard let raw = e["fileName"]?.string, !raw.isEmpty else {
+                throw ExtensionError("exports[\(j)]: fileName is required")
+            }
+            let name = raw.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+            return SolutionExport(title: e["title"]?.text ?? name, fileName: name, content: e["content"]?.string ?? "")
+        }
+        return result
     }
 
     private static func list(_ v: JSONValue?, _ path: String) throws -> [JSONValue] {

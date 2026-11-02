@@ -141,6 +141,8 @@ final class AppModel {
     var scopeID = "all" { didSet { if oldValue != scopeID { recompute(); noteChange() } } }
     var sidebar: SidebarItem? = .overview
     var isLoading = false
+    /// An export whose columns are waiting to be checked (see `ColumnMappingSheet`).
+    var columnReview: ColumnReview?
     var loadingMessage = ""
     var errorMessage: String?
     var sources: [URL] = []
@@ -362,7 +364,9 @@ final class AppModel {
                         loaded = (only.dataset, only.inventory)
                     }
                 }
-                let ds = try loaded?.0 ?? Dataset.load(urls)
+                // A saved project keeps its column choices; anything else with unusual columns is shown for checking.
+                let ds = try loaded?.0 ?? Dataset.load(urls, columnChoices: project?.file.columnMapping,
+                                                       reviewColumns: project == nil ? { self.checkColumns($0) } : nil)
                 await MainActor.run { self.loadingMessage = "Correlating \(ds.tableNames.count) tabs…" }
                 let inv = loaded?.1 ?? InventoryBuilder.build(ds)
                 let report = Analyzer.run(inv, thresholds: t, acknowledgements: acks)
@@ -376,10 +380,32 @@ final class AppModel {
                 await MainActor.run {
                     scoped.forEach { $0.stopAccessingSecurityScopedResource() }
                     self.isLoading = false
-                    self.errorMessage = error.localizedDescription
+                    if !(error is CancellationError) { self.errorMessage = error.localizedDescription }
                 }
             }
         }
+    }
+
+    /// Called partway through a load, off the main thread: waits while the columns are checked in a sheet.
+    private nonisolated func checkColumns(_ plan: ColumnPlan) -> ColumnPlan? {
+        final class Answer: @unchecked Sendable { var plan: ColumnPlan? }
+        let answer = Answer()
+        let finished = DispatchSemaphore(value: 0)
+        Task { @MainActor in
+            self.columnReview = ColumnReview(plan: plan) {
+                answer.plan = $0
+                finished.signal()
+            }
+            DebugSnapshot.runIfRequested(columnReview: self)
+        }
+        finished.wait()
+        return answer.plan
+    }
+
+    func finishColumnReview(_ plan: ColumnPlan?) {
+        let review = columnReview
+        columnReview = nil
+        review?.finish(plan)
     }
 
     // MARK: Trend mode
@@ -716,6 +742,7 @@ final class AppModel {
         p.solutionTabs = solutionTab
         p.page = sidebar?.id
         p.mode = trend == nil ? nil : ProjectFile.trendMode
+        p.columnMapping = dataset?.columnPlans.isEmpty == false ? dataset?.columnChoices : nil
         return p
     }
 

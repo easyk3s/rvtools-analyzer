@@ -36,6 +36,8 @@ public struct ProjectFile: Codable, Sendable {
     public var mode: String?
     /// Trend projects: source files (relative) per snapshot.
     public var snapshotGroups: [[String]]?
+    /// Columns chosen for exports with non-standard headers, so reopening doesn't ask again.
+    public var columnMapping: ColumnChoices?
 
     public init(name: String) {
         self.name = name

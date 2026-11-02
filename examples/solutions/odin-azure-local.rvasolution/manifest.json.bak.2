@@ -4,8 +4,8 @@
   "title": "Azure Local Sizer (ODIN)",
   "symbol": "server.rack",
   "summary": "Size the selected VMs onto Azure Local nodes, and open the same workloads pre-loaded in ODIN for Azure Local.",
-  "version": "1.2.0",
-  "author": "RVTools Analyzer examples",
+  "version": "1.1.0",
+  "author": "Eric Steinke",
   "defaultSelection": "poweredOn",
   "parameters": [
     {
@@ -155,25 +155,13 @@
     },
     {
       "id": "memory",
-      "type": "choice",
+      "type": "number",
       "group": "Node hardware",
       "label": "Memory per node",
-      "options": [
-        "64 GB",
-        "128 GB",
-        "192 GB",
-        "256 GB",
-        "384 GB",
-        "512 GB",
-        "768 GB",
-        "1024 GB",
-        "1536 GB",
-        "2048 GB",
-        "3072 GB",
-        "4096 GB"
-      ],
-      "default": 2,
-      "help": "Same list as ODIN Sizer's Memory per Machine dropdown (64 GB to 4 TB)."
+      "default": 192,
+      "min": 64,
+      "max": 4096,
+      "unit": "GiB"
     },
     {
       "id": "vcpuRatio",

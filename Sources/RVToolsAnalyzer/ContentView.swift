@@ -26,6 +26,9 @@ struct ContentView: View {
                 }
             }
         }
+        .sheet(item: Binding(get: { model.columnReview }, set: { _ in })) { review in
+            ColumnMappingSheet(review: review) { model.finishColumnReview($0) }
+        }
         .background(WindowCloseGuard())
         .dropDestination(for: URL.self) { urls, _ in
             model.open(urls)
