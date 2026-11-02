@@ -553,7 +553,6 @@ public struct AlternateHypervisors: Solution {
         func storageMiB(_ vm: VM) -> Double {
             (provisioned ? (vm.diskCapacityMiB > 0 ? vm.diskCapacityMiB : vm.provisionedMiB) : vm.inUseExcludingSwapMiB) * growth / (1 - reserve)
         }
-        let usableMiB = vms.filter(\.isVM).reduce(0) { $0 + storageMiB($1) } * (1 - reserve)
 
         // Active memory only counts when most VMs report it; VMs without it are taken at their sized memory.
         let useActive = running.filter { $0.memActiveMiB > 0 }.count * 2 >= running.count
