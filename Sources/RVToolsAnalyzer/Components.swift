@@ -1,3 +1,4 @@
+import AppKit
 import Charts
 import RVToolsCore
 import SwiftUI
@@ -324,11 +325,22 @@ struct ColumnChart: View {
             Text("No data").font(.callout).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, minHeight: height, alignment: .center)
         } else {
-            chart
+            chartContent
         }
     }
 
     private var chart: some View {
+        chartContent.contextMenu {
+            Button("Copy Image", systemImage: "doc.on.doc") {
+                if let image = ImageRenderer(content: chartContent).nsImage {
+                    copyToClipboard(image)
+                }
+            }
+        }
+    }
+
+
+    private var chartContent: some View {
         Chart(items) { item in
             BarMark(x: .value("Bucket", item.label), y: .value("Count", item.count), width: .ratio(0.7))
                 .foregroundStyle(color.opacity(hovered == nil || hovered == item.label ? 1 : 0.4))
