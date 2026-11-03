@@ -383,17 +383,6 @@ struct ColumnChart: View {
         }
     }
 
-    private var chart: some View {
-        chartContent.contextMenu {
-            Button("Copy Image", systemImage: "doc.on.doc") {
-                if let image = ImageRenderer(content: chartContent).nsImage {
-                    copyToClipboard(image)
-                }
-            }
-        }
-    }
-
-
     private var chartContent: some View {
         Chart(items) { item in
             BarMark(x: .value("Bucket", item.label), y: .value("Count", item.count), width: .ratio(0.7))
