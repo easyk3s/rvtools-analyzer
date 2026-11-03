@@ -379,7 +379,7 @@ struct ColumnChart: View {
             Text("No data").font(.callout).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, minHeight: height, alignment: .center)
         } else {
-            chart
+            chartContent
         }
     }
 
