@@ -7,6 +7,7 @@ struct Card<Content: View>: View {
     let title: String?
     let subtitle: String?
     let content: Content
+    @State private var cardWidth: CGFloat = 0
 
     init(_ title: String? = nil, subtitle: String? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
@@ -15,11 +16,33 @@ struct Card<Content: View>: View {
     }
 
     var body: some View {
+        cardContent(includeCopyButton: true)
+            .background {
+                GeometryReader { geometry in
+                    Color.clear
+                        .onAppear { cardWidth = geometry.size.width }
+                        .onChange(of: geometry.size.width) { _, width in cardWidth = width }
+                }
+            }
+    }
+
+    @ViewBuilder
+    private func cardContent(includeCopyButton: Bool) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if let title {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.headline)
-                    if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
+                if includeCopyButton {
+                    HStack(alignment: .top, spacing: 8) {
+                        cardTitle(title)
+                        Spacer(minLength: 0)
+                        copyButton
+                    }
+                } else {
+                    cardTitle(title)
+                }
+            } else if includeCopyButton {
+                HStack {
+                    Spacer()
+                    copyButton
                 }
             }
             content
@@ -28,6 +51,37 @@ struct Card<Content: View>: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Palette.card))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
+    }
+
+    private func cardTitle(_ title: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.headline)
+            if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+
+    private var copyButton: some View {
+        Button {
+            copyCardImage()
+        } label: {
+            Image(systemName: "doc.on.doc")
+                .font(.caption)
+                .padding(4)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Copy card as image")
+        .accessibilityLabel("Copy card as image")
+    }
+
+    private func copyCardImage() {
+        guard cardWidth > 0 else { return }
+        let renderer = ImageRenderer(content: cardContent(includeCopyButton: false).frame(width: cardWidth))
+        renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
+        if let image = renderer.nsImage {
+            copyToClipboard(image)
+        }
     }
 }
 
@@ -325,7 +379,7 @@ struct ColumnChart: View {
             Text("No data").font(.callout).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, minHeight: height, alignment: .center)
         } else {
-            chartContent
+            chart
         }
     }
 
