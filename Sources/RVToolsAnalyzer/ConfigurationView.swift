@@ -127,6 +127,7 @@ struct LicenseStatus: View {
 }
 
 struct LifecycleView: View {
+    @Environment(AppModel.self) private var model
     let report: Report
 
     var body: some View {
@@ -178,16 +179,38 @@ struct LifecycleView: View {
                             }
                             .font(.callout)
                         }
-                        Card("vCenter") {
+                        Card(inv.vcenters.allSatisfy { $0.kind == .vCenter } ? "vCenter" : "vCenter (inferred)") {
+                            if !model.vcenterMerges.isEmpty {
+                                Button("Undo merged vCenters") { model.resetVCenterMerges() }
+                                    .buttonStyle(.link)
+                                    .font(.caption)
+                            }
                             ForEach(inv.vcenters) { vc in
                                 let v = Lifecycle.parseVMwareVersion(vc.version.isEmpty ? vc.fullName : vc.version).version
                                 HStack {
                                     VStack(alignment: .leading, spacing: 1) {
                                         Text(vc.server).font(.callout.weight(.medium))
-                                        Text(vc.fullName.isEmpty ? "Version unknown (no vSource tab)" : vc.fullName).font(.caption).foregroundStyle(.secondary)
+                                        switch vc.kind {
+                                        case .vCenter:
+                                            Text(vc.fullName.isEmpty ? "Version unknown (no vSource tab)" : vc.fullName).font(.caption).foregroundStyle(.secondary)
+                                        case .inferred:
+                                            Text("Inferred from the certificates of \(vc.sourceHosts.count) ESXi host(s) exported directly. Version unknown").font(.caption).foregroundStyle(.secondary)
+                                        case .esxiHost:
+                                            Text("ESXi host exported directly, with no sign of a vCenter · \(vc.fullName)").font(.caption).foregroundStyle(.secondary)
+                                        }
                                     }
                                     Spacer()
-                                    if let e = Lifecycle.vsphereEndOfSupport(v) { status(e, now: now, yearAhead: yearAhead) }
+                                    if vc.kind == .vCenter, let e = Lifecycle.vsphereEndOfSupport(v) { status(e, now: now, yearAhead: yearAhead) }
+                                    let others = inv.vcenters.filter { $0.id != vc.id && $0.kind != .esxiHost }
+                                    if vc.kind != .vCenter, !others.isEmpty, model.trend == nil {
+                                        Menu("Merge into") {
+                                            ForEach(others) { other in
+                                                Button(other.server) { model.mergeVCenter(vc.server, into: other.server) }
+                                            }
+                                        }
+                                        .menuStyle(.borderlessButton)
+                                        .fixedSize()
+                                    }
                                 }
                             }
                         }

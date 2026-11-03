@@ -511,6 +511,7 @@ enum Rules {
             let L = d.clusterList.isEmpty ? d.type : d.clusterList
             let f = { (rule: String, detail: String) in e.add(rule, .datastore, d.id, d.name, L, detail) }
             if !d.accessible { f("ds.inaccessible", "Not accessible") }
+            else if !d.inaccessibleFrom.isEmpty { f("ds.inaccessible", "Not accessible from \(d.inaccessibleFrom.joined(separator: ", "))") }
             if d.capacityMiB > 0 {
                 let detail = "\(Fmt.num(d.freePct, 1))% free (\(Fmt.capacity(mib: d.freeMiB)) of \(Fmt.capacity(mib: d.capacityMiB)))"
                 if d.freePct < t.datastoreFreeCritPct { f("ds.free.critical", detail) }
@@ -574,7 +575,7 @@ enum Rules {
         }
 
         // MARK: vCenter & licensing
-        for vc in inv.vcenters {
+        for vc in inv.vcenters where vc.kind != .esxiHost {
             let v = Lifecycle.parseVMwareVersion(vc.version.isEmpty ? vc.fullName : vc.version).version
             if let eol = Lifecycle.vsphereEndOfSupport(v) {
                 if eol <= supportDate { e.add("vc.eol", .vcenter, vc.id, vc.server, "", "vCenter \(v) — support ended \(Fmt.date(eol))") }

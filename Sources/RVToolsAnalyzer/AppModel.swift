@@ -200,6 +200,8 @@ final class AppModel {
 
     // Projects: saved sessions (.rvaproj). Once saved, changes autosave.
     var projectURL: URL?
+    /// Inferred vCenters merged by hand, from name to name; saved with the project.
+    private(set) var vcenterMerges: [String: String] = [:]
     var projectName = "" { didSet { if oldValue != projectName { noteChange() } } }
     var projectNotes = "" { didSet { if oldValue != projectNotes { noteChange() } } }
     var isDirty = false
@@ -366,7 +368,7 @@ final class AppModel {
                     }
                 }
                 // A saved project keeps its column choices; anything else with unusual columns is shown for checking.
-                let ds = try loaded?.0 ?? Dataset.load(urls, columnChoices: project?.file.columnMapping,
+                let ds = try loaded?.0 ?? Dataset.load(urls, columnChoices: project?.file.columnMapping, vcenterMerges: project?.file.vcenterMerges,
                                                        reviewColumns: project == nil ? { self.checkColumns($0) } : nil)
                 await MainActor.run { self.loadingMessage = "Correlating \(ds.tableNames.count) tabs…" }
                 let inv = loaded?.1 ?? InventoryBuilder.build(ds)
@@ -385,6 +387,69 @@ final class AppModel {
                 }
             }
         }
+    }
+
+    /// Regroups ESXi host exports with this inferred vCenter (or lone host) under another, keeping the session's settings.
+    func mergeVCenter(_ from: String, into to: String) {
+        var merges = vcenterMerges
+        merges[from] = to
+        regroupHosts(merges)
+    }
+
+    func resetVCenterMerges() { regroupHosts([:]) }
+
+    private func regroupHosts(_ merges: [String: String]) {
+        guard let dataset, trend == nil, let old = fullInventory else { return }
+        let urls = sources, choices = dataset.columnChoices, t = thresholds, acks = acknowledgements
+        isLoading = true
+        errorMessage = nil
+        loadingMessage = "Regrouping hosts…"
+        Task.detached(priority: .userInitiated) {
+            do {
+                let ds = try Dataset.load(urls, columnChoices: choices, vcenterMerges: merges)
+                let inv = InventoryBuilder.build(ds)
+                let report = Analyzer.run(inv, thresholds: t, acknowledgements: acks)
+                await MainActor.run { self.applyRegrouped(ds, inv, report, merges: merges, from: old) }
+            } catch {
+                await MainActor.run {
+                    self.isLoading = false
+                    self.errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    /// Only the moved objects' IDs change, so the session carries over once VM selections follow their VMs.
+    private func applyRegrouped(_ ds: Dataset, _ inv: Inventory, _ r: Report, merges: [String: String], from old: Inventory) {
+        var kept = snapshot()
+        let url = projectURL
+        let moved = Dictionary(old.vms.map { ($0.id, $0.host + "|" + $0.name) }, uniquingKeysWith: { a, _ in a })
+        let current = Dictionary(inv.vms.map { ($0.host + "|" + $0.name, $0.id) }, uniquingKeysWith: { a, _ in a })
+        kept.solutionSelections = kept.solutionSelections.mapValues { ids in ids.compactMap { moved[$0].flatMap { current[$0] } } }
+        let lists = PriceLibrary.shared.projectLists
+        let page = sidebar, priceRefs = projectPriceRefs, solutionIDs = projectSolutionIDs, saved = lastSaved
+        apply(ds, inv, r)
+        restoring = true
+        defer { restoring = false }
+        vcenterMerges = merges
+        currentProject = kept
+        projectName = kept.name
+        projectNotes = kept.notes
+        projectURL = url
+        PriceLibrary.shared.setProjectLists(lists)
+        projectListIDs = Set(lists.map { $0.id })
+        projectPriceRefs = priceRefs
+        projectSolutionIDs = solutionIDs
+        lastSaved = saved
+        thresholds = kept.thresholds
+        acknowledgements = kept.acknowledgements ?? []
+        for (id, ids) in kept.solutionSelections { solutionSelections[id] = Set(ids) }
+        for (id, values) in kept.solutionParams { solutionParams[id] = values }
+        resetMissingHostPicks()
+        solutionTab = kept.solutionTabs
+        sidebar = page
+        isDirty = true
+        if projectURL != nil { scheduleAutosave() }
     }
 
     /// Called partway through a load, off the main thread: waits while the columns are checked in a sheet.
@@ -624,6 +689,7 @@ final class AppModel {
         sidebar = trend == nil ? .overview : .trendSummary
         isLoading = false
         // A freshly opened export is a new, unsaved session.
+        vcenterMerges = [:]
         projectURL = nil
         currentProject = nil
         projectName = ""
@@ -657,6 +723,7 @@ final class AppModel {
         currentProject = p
         projectURL = url
         projectName = p.name
+        vcenterMerges = p.vcenterMerges ?? [:]
         projectNotes = p.notes
         lastSaved = p.modified
         if !prices.isEmpty {
@@ -744,6 +811,7 @@ final class AppModel {
         p.page = sidebar?.id
         p.mode = trend == nil ? nil : ProjectFile.trendMode
         p.columnMapping = dataset?.columnPlans.isEmpty == false ? dataset?.columnChoices : nil
+        p.vcenterMerges = vcenterMerges.isEmpty ? nil : vcenterMerges
         return p
     }
 
@@ -903,7 +971,8 @@ final class AppModel {
         let byVC = Dictionary(grouping: inv.clusters, by: { $0.vcenter })
         if byVC.count > 1 {
             for (i, (vc, cs)) in byVC.sorted(by: { $0.key < $1.key }).enumerated() {
-                out.append(ScopeOption(id: "vc:" + vc, label: "vCenter \(vc)", clusterIDs: Set(cs.map(\.id)), isGroupStart: i == 0))
+                let label = inv.vcenters.first { $0.server == vc }?.label ?? "vCenter \(vc)"
+                out.append(ScopeOption(id: "vc:" + vc, label: label, clusterIDs: Set(cs.map(\.id)), isGroupStart: i == 0))
             }
         }
         let byDC = Dictionary(grouping: inv.clusters, by: { $0.vcenter + " / " + $0.datacenter })

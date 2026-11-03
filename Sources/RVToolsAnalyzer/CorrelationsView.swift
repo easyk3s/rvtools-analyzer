@@ -25,7 +25,7 @@ struct CorrelationsView: View {
 
                 Card("Entity graph", subtitle: "Every tab is joined into this object model (counts for the current scope)") {
                     VStack(alignment: .leading, spacing: 14) {
-                        chain([("vCenters", inv.vcenters.count), ("Datacenters", inv.datacenterCount), ("Clusters", report.totals.clusters),
+                        chain([("vCenters", report.totals.vcenters), ("Datacenters", inv.datacenterCount), ("Clusters", report.totals.clusters),
                                ("Hosts", inv.hosts.count), ("VMs", inv.vms.count)])
                         HStack(alignment: .top, spacing: 24) {
                             satellites("Each VM joins", [("vCPU / vMemory / vTools", inv.vms.count), ("Disks", report.totals.disks),

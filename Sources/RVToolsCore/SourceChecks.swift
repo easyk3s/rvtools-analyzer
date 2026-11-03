@@ -74,7 +74,12 @@ enum SourceChecks {
         let infoRows = dataRows(info)
         let cVM = info.col("VM")
         if infoRows.isEmpty {
-            add("vInfo has no rows, so none of its VMs were read", "VMs on other tabs were rebuilt from them, with fewer details, and start unselected in solutions", level: .noVMsRead)
+            // Nothing to read if the hosts really have no VMs, which an export from one empty host does.
+            let hosts = table("vHost")
+            let hostRows = hosts.map(dataRows) ?? []
+            let cVMs = hosts?.col("# VMs total") ?? hosts?.col("# VMs")
+            let noVMs = cVMs != nil && !hostRows.isEmpty && !hostRows.contains { $0.d0(cVMs) != 0 }
+            if !noVMs { add("vInfo has no rows, so none of its VMs were read", "VMs on other tabs were rebuilt from them, with fewer details, and start unselected in solutions", level: .noVMsRead) }
         } else if cVM == nil {
             add("vInfo has no VM column, so its \(Fmt.int(infoRows.count)) row(s) couldn't be read as VMs",
                 "VMs on other tabs were rebuilt from them, with fewer details, and start unselected in solutions", level: .noVMsRead)
