@@ -392,6 +392,8 @@ public struct Datastore: Identifiable, Sendable {
     public var isVMCManagementDatastore = false
     /// Known only from VM file paths (the export has no vDatastore tab): no capacity, type or host mounts.
     public var inferred = false
+    /// Hosts that report it as not accessible, when it's read host by host and other hosts can reach it.
+    public var inaccessibleFrom: [String] = []
 
     public var vmCount: Int { vmIDs.count }
     public var hostCount: Int { hostNames.count }
@@ -566,6 +568,27 @@ public struct VCenter: Identifiable, Sendable {
     /// just the address RVTools connected to (an IP in one export, an FQDN in the next).
     public var instanceUUID = ""
     public var datacenters: [String] = []
+    /// What this entry really is: RVTools can read an ESXi host directly, which it reports just like a vCenter.
+    public var kind = Kind.vCenter
+    /// For an inferred vCenter: the ESXi hosts' addresses, each read from its own export.
+    public var sourceHosts: [String] = []
+
+    public enum Kind: String, Sendable {
+        case vCenter
+        /// Not read at all: named by the certificates of ESXi hosts exported directly, so its version is unknown.
+        case inferred
+        /// An ESXi host exported directly, with no evidence of a vCenter.
+        case esxiHost
+    }
+
+    /// "vCenter a.example", "Inferred vCenter a.example" or "ESXi host a.example".
+    public var label: String {
+        switch kind {
+        case .vCenter: return "vCenter \(server)"
+        case .inferred: return "Inferred vCenter \(server)"
+        case .esxiHost: return "ESXi host \(server)"
+        }
+    }
 }
 
 /// How rows in one tab were joined to entities from another.
@@ -638,6 +661,15 @@ public struct Inventory: Sendable {
 
     /// VMC management datastores whose capacity is the same vSAN capacity as WorkloadDatastore.
     public var vmcManagementDatastores: [Datastore] { datastores.filter(\.isVMCManagementDatastore) }
+    /// "2 vCenters", "3 inferred vCenters", "1 vCenter + 2 ESXi hosts": ESXi hosts read directly aren't vCenters.
+    public var vcenterSummary: String {
+        func count(_ kind: VCenter.Kind, _ noun: String) -> String? {
+            let n = vcenters.filter { $0.kind == kind }.count
+            return n > 0 ? "\(n) \(noun)\(n == 1 ? "" : "s")" : nil
+        }
+        let parts = [count(.vCenter, "vCenter"), count(.inferred, "inferred vCenter"), count(.esxiHost, "ESXi host")].compactMap { $0 }
+        return parts.isEmpty ? "0 vCenters" : parts.joined(separator: " + ")
+    }
 
     /// The inventory without these datastores; host and cluster datastore counts and vHealth messages follow.
     public func removingDatastores(_ ids: Set<String>) -> Inventory {

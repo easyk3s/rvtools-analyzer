@@ -332,7 +332,7 @@ Unknown values are `null`. Fields are only ever added within an API version.
 |---|---|
 | `apiVersion`, `reportDate` | |
 | `vms`, `hosts`, `clusters`, `datastores`, `portGroups` | see below |
-| `vcenters` | `{ id, server, fullName, version, build }` |
+| `vcenters` | `{ id, server, kind, fullName, version, build }`. `kind` is `vCenter`, `inferred` (named by the certificates of ESXi hosts exported directly, version unknown) or `esxiHost` (a host exported directly, with no sign of a vCenter) |
 | `pnics` | `{ hostId, host, device, driver, speedMbps, switch }` |
 | `vmkernels` | `{ hostId, host, device, portGroup, ip, subnet, mtu }` |
 | `licenses` | `{ vcenter, name, total, used, costUnit, expiration }` |

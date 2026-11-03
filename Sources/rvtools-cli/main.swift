@@ -51,6 +51,13 @@ if let i = args.firstIndex(of: "--map"), i + 1 < args.count {
     mapSpec = args[i + 1]
     args.removeSubrange(i...(i + 1))
 }
+// --merge-vcenter <from>=<to>: regroup ESXi host exports inferred under one vCenter into another (repeatable).
+var vcenterMerges: [String: String] = [:]
+while let i = args.firstIndex(of: "--merge-vcenter"), i + 1 < args.count {
+    let pair = args[i + 1].split(separator: "=", maxSplits: 1).map(String.init)
+    if pair.count == 2 { vcenterMerges[pair[0]] = pair[1] }
+    args.removeSubrange(i...(i + 1))
+}
 // --save-project <path>: save the loaded export (plus any --solution/--set assumptions) as a .rvaproj project.
 var saveProjectPath: String?
 if let i = args.firstIndex(of: "--save-project"), i + 1 < args.count {
@@ -268,7 +275,7 @@ if let path = decksRecipe {
 
 guard !args.isEmpty else {
     print("usage: rvtools-cli <RVTools export .xlsx | folder of RVTools_tab*.csv | project.rvaproj> [...] [--columns] [--export <dir>]")
-    print("       [--solution <id> [--pptx <file> [--template <file>]]] [--decks <recipe> [--out <dir> | --zip <file>] [--customer <name>]] [--set name=value ...] [--select selection=vms ...] [--save-project <path>] [--trend] [--map kind:name] [--units binary|decimal] [--rate bits|bytes]")
+    print("       [--merge-vcenter <from>=<to>] [--solution <id> [--pptx <file> [--template <file>]]] [--decks <recipe> [--out <dir> | --zip <file>] [--customer <name>]] [--set name=value ...] [--select selection=vms ...] [--save-project <path>] [--trend] [--map kind:name] [--units binary|decimal] [--rate bits|bytes]")
     print("       --list-solutions | --validate-solution <pack> [export] | --solutions <dir> | --price-list <file> | --prices azure|aws")
     exit(1)
 }
@@ -331,7 +338,7 @@ do {
         PriceLibrary.shared.setProjectLists(opened.priceLists)
         print("Project:      \(opened.project.name) (saved \(Fmt.dateTime(opened.project.modified)))")
     }
-    let ds = try Dataset.load(inputs, columnChoices: project?.columnMapping)
+    let ds = try Dataset.load(inputs, columnChoices: project?.columnMapping, vcenterMerges: vcenterMerges.isEmpty ? project?.vcenterMerges : vcenterMerges)
     let t1 = Date()
     let inv = InventoryBuilder.build(ds)
     let t2 = Date()
@@ -344,6 +351,7 @@ do {
         var p = project ?? ProjectFile(name: url.deletingPathExtension().lastPathComponent)
         p.name = url.deletingPathExtension().lastPathComponent
         if !ds.columnPlans.isEmpty { p.columnMapping = ds.columnChoices }
+        if !vcenterMerges.isEmpty { p.vcenterMerges = vcenterMerges }
         for s in SolutionCatalog.all {
             let chosen = s.id == solutionID || validated?.id == s.id
             for (key, ids) in resolveSelections(s, r.inventory) where p.solutionSelections[key] == nil || (chosen && !selectOverrides.isEmpty) {
@@ -432,7 +440,8 @@ do {
 
     let t = r.totals
     print("\n== Inventory")
-    print("vCenters \(t.vcenters) · datacenters \(t.datacenters) · clusters \(t.clusters) · hosts \(t.hosts) (\(t.hostsInMaintenance) in maintenance)")
+    let kinds = r.inventory.vcenters.allSatisfy { $0.kind == .vCenter } ? "vCenters \(t.vcenters)" : r.inventory.vcenterSummary
+    print("\(kinds) · datacenters \(t.datacenters) · clusters \(t.clusters) · hosts \(t.hosts) (\(t.hostsInMaintenance) in maintenance)")
     print("VMs \(t.vms): on \(t.vmsOn), off \(t.vmsOff), suspended \(t.vmsSuspended) · templates \(t.templates)")
     print("Compute: \(t.sockets) sockets, \(t.cores) cores, \(Fmt.memory(mib: t.physMemMiB)) RAM · vCPU on \(t.vcpuOn) (\(Fmt.ratio(t.vcpuPerCore))) · vRAM on \(Fmt.memory(mib: t.vramOnMiB))")
     print("Utilisation: CPU \(Fmt.pct(t.cpuUsagePct)) · memory \(Fmt.pct(t.memUsagePct))")

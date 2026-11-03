@@ -230,6 +230,8 @@ public final class PriceLibrary: @unchecked Sendable {
         }
     }
 
+    public var projectLists: [PriceList] { locked { projectEntries.values.map(\.list) } }
+
     /// Lists saved in the open project (used when the same id isn't installed).
     public func setProjectLists(_ lists: [PriceList]) {
         let valid = lists.filter { $0.problems.isEmpty }

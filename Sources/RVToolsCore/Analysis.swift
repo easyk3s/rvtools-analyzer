@@ -143,7 +143,7 @@ public enum Analyzer {
 
     static func totals(_ inv: Inventory, _ findings: [Finding]) -> Totals {
         var t = Totals()
-        t.vcenters = inv.vcenters.count
+        t.vcenters = inv.vcenters.filter { $0.kind != .esxiHost }.count
         t.datacenters = inv.datacenterCount
         t.clusters = inv.clusters.filter { !$0.isStandalone }.count
         t.hosts = inv.hosts.count
