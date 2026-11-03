@@ -109,6 +109,8 @@ public struct VM: Identifiable, Sendable {
     public var powerState: PowerState = .off
     public var isTemplate = false
     public var isSRMPlaceholder = false
+    /// Rebuilt from other tabs because its vInfo row is gone, so it has fewer details and starts unselected in solutions.
+    public var notInVInfo = false
     public var configStatus = ""
     public var connectionState = ""
     public var guestState = ""

@@ -506,8 +506,8 @@ final class AppModel {
             for sel in s.selections {
                 let key = sel.key(s.id)
                 let current = solutionSelections[key] ?? []
-                let untouched = previous.map { current == s.defaultSelection($0, for: sel) } ?? true
-                solutionSelections[key] = untouched ? s.defaultSelection(snap.inventory, for: sel) : current.intersection(valid)
+                let untouched = previous.map { current == s.initialSelection($0, for: sel) } ?? true
+                solutionSelections[key] = untouched ? s.initialSelection(snap.inventory, for: sel) : current.intersection(valid)
             }
         }
         selectedHostID = nil
@@ -1167,7 +1167,7 @@ final class AppModel {
     static func defaultSelections(_ solutions: [any Solution], _ inv: Inventory) -> [String: Set<String>] {
         var out: [String: Set<String>] = [:]
         for s in solutions {
-            for sel in s.selections { out[sel.key(s.id)] = s.defaultSelection(inv, for: sel) }
+            for sel in s.selections { out[sel.key(s.id)] = s.initialSelection(inv, for: sel) }
         }
         return out
     }

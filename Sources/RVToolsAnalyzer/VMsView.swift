@@ -104,6 +104,10 @@ private struct VMNameCell: View {
         HStack(spacing: 6) {
             PowerIcon(vm: vm).frame(width: 12)
             Text(vm.name)
+            if vm.notInVInfo {
+                Text("Not in vInfo").font(.caption2).foregroundStyle(.secondary)
+                    .help("Rebuilt from other tabs because its vInfo row is gone, so it has fewer details")
+            }
         }
     }
 }

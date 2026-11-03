@@ -41,6 +41,7 @@ private final class Builder {
         buildHosts()
         buildClusters()
         buildVMs()
+        restoreVMsMissingFromVInfo()
         inferHosts()
         attachVMChildren()
         buildDatastores()
@@ -283,14 +284,7 @@ private final class Builder {
             vm.datacenter = r.s(cDC)
             vm.cluster = r.s(cCluster)
             vm.host = r.s(cHost)
-            if let hi = matchHost(server, vm.host) {
-                vm.hostKey = inv.hosts[hi].id
-                vm.clusterKey = inv.hosts[hi].clusterKey
-                if vm.datacenter.isEmpty { vm.datacenter = inv.hosts[hi].datacenter }
-            } else {
-                vm.hostKey = key(server, vm.host)
-                vm.clusterKey = Builder.clusterID(server, vm.datacenter, vm.cluster)
-            }
+            place(&vm)
             vm.folder = r.s(cFolder)
             vm.resourcePool = r.s(cRP)
             vm.vApp = r.s(cVApp)
@@ -335,20 +329,86 @@ private final class Builder {
             for c in cNets { let n = r.s(c); if !n.isEmpty, !vm.networks.contains(n) { vm.networks.append(n) } }
             if let d = Parse.datastore(fromPath: vm.vmxPath) { vm.datastores.append(d) }
 
-            inv.vms.append(vm)
-            let idx = inv.vms.count - 1
-            vInfoDiskTotal[idx] = r.d0(cDiskTotal)
-            vmIDs.insert(id)
-            if !vmid.isEmpty { vmByID[key(server, vmid)] = idx }
-            if !uuid.isEmpty { vmByUUID[key(server, uuid)] = idx }
-            vmByName[key(server, name)] = idx
-            vmByBareName[name.lowercased(), default: []].append(idx)
+            vInfoDiskTotal[inv.vms.count] = r.d0(cDiskTotal)
+            add(vm)
         }
         for vm in inv.vms { ensureCluster(server: vm.vcenter, datacenter: vm.datacenter, name: vm.cluster.isEmpty && vm.clusterKey.contains("~standalone") ? "" : vm.cluster) }
 
         let withHost = inv.vms.filter { !$0.host.isEmpty }
         let hostMatched = withHost.filter { hostIndex[$0.hostKey] != nil }.count
         inv.joins.append(JoinStat(source: t.name, target: "Host (vHost)", keys: "VI SDK Server + Host", matched: hostMatched, total: withHost.count))
+    }
+
+    /// Sets a VM's host and cluster keys from its vCenter, host, cluster and datacenter names.
+    func place(_ vm: inout VM) {
+        if let hi = matchHost(vm.vcenter, vm.host) {
+            vm.hostKey = inv.hosts[hi].id
+            vm.clusterKey = inv.hosts[hi].clusterKey
+            if vm.datacenter.isEmpty { vm.datacenter = inv.hosts[hi].datacenter }
+        } else {
+            vm.hostKey = key(vm.vcenter, vm.host)
+            vm.clusterKey = Builder.clusterID(vm.vcenter, vm.datacenter, vm.cluster)
+        }
+    }
+
+    func add(_ vm: VM) {
+        let idx = inv.vms.count
+        inv.vms.append(vm)
+        vmIDs.insert(vm.id)
+        if !vm.vmID.isEmpty { vmByID[key(vm.vcenter, vm.vmID)] = idx }
+        if !vm.uuid.isEmpty { vmByUUID[key(vm.vcenter, vm.uuid)] = idx }
+        vmByName[key(vm.vcenter, vm.name)] = idx
+        vmByBareName[vm.name.lowercased(), default: []].append(idx)
+    }
+
+    /// RVTools lists every VM on each VM tab, so a VM that's on the others but not in vInfo had its row removed. It's
+    /// rebuilt from those tabs here, before they're joined, so their rows attach to it instead of to a VM with the same
+    /// name in another vCenter. Its figures are filled in like any other blank (see `fillMissingFigures`).
+    func restoreVMsMissingFromVInfo() {
+        guard ds.sourceTools.isEmpty else { return }
+        for tab in ["vCPU", "vMemory", "vDisk", "vTools"] {
+            guard let t = ds.table(tab), let cVM = t.col("VM") else { continue }
+            let cServer = t.col("VI SDK Server"), cVMID = t.col("VM ID"), cUUID = t.col("VM UUID")
+            let cPower = t.col("Powerstate"), cTemplate = t.col("Template"), cSRM = t.col("SRM Placeholder")
+            let cDC = t.col("Datacenter"), cCluster = t.col("Cluster"), cHost = t.col("Host"), cFolder = t.col("Folder")
+            let cNote = t.col("Annotation"), cOSConf = t.col("OS according to the configuration file", "OS"), cOSTools = t.col("OS according to the VMware Tools")
+            let cCustom = t.customColumns.sorted()
+            for (ri, r) in t.rows.enumerated() {
+                let server = r.s(cServer), name = r.s(cVM), vmid = r.s(cVMID), uuid = r.s(cUUID)
+                guard !name.isEmpty, r.filter({ !$0.isEmpty }).count > 1 else { continue }
+                if !vmid.isEmpty, vmByID[key(server, vmid)] != nil { continue }
+                if !uuid.isEmpty, vmByUUID[key(server, uuid)] != nil { continue }
+                // Two VMs can share a name, so a name only settles it when there's no VM ID to tell them apart.
+                if let i = vmByName[key(server, name)], vmid.isEmpty || inv.vms[i].vmID.isEmpty { continue }
+                ensureVCenter(server)
+                var id = !vmid.isEmpty ? key(server, vmid) : (!uuid.isEmpty ? key(server, "uuid:" + uuid) : key(server, "name:\(name)"))
+                if vmIDs.contains(id) { id += "#\(tab)\(ri)" }
+                var vm = VM(id: id)
+                vm.notInVInfo = true
+                vm.name = name
+                vm.vcenter = server
+                vm.datacenter = r.s(cDC)
+                vm.cluster = r.s(cCluster)
+                vm.host = r.s(cHost)
+                place(&vm)
+                vm.folder = r.s(cFolder)
+                vm.powerState = PowerState(raw: r.s(cPower))
+                vm.isTemplate = r.b(cTemplate) ?? false
+                vm.isSRMPlaceholder = r.b(cSRM) ?? false
+                vm.annotation = r.s(cNote)
+                for c in cCustom {
+                    let value = r.s(c).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !value.isEmpty { vm.customFields.append(VCustomField(name: t.headers[c], value: value)) }
+                }
+                vm.osConfig = r.s(cOSConf)
+                vm.osTools = r.s(cOSTools)
+                vm.os = Lifecycle.classify(config: vm.osConfig, tools: vm.osTools)
+                vm.vmID = vmid
+                vm.uuid = uuid
+                add(vm)
+                ensureCluster(server: vm.vcenter, datacenter: vm.datacenter, name: vm.cluster)
+            }
+        }
     }
 
     /// Without vHost, hosts are still named on every VM row: keep them as placeholders so placement, maps and

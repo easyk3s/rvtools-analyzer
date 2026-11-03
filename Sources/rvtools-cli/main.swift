@@ -198,7 +198,7 @@ while let i = args.firstIndex(of: "--select"), i + 1 < args.count {
 func resolveSelections(_ s: any Solution, _ inv: Inventory) -> [String: Set<String>] {
     var out: [String: Set<String>] = [:]
     for sel in s.selections {
-        var ids = project?.solutionSelections[sel.key(s.id)].map { Set($0) } ?? s.defaultSelection(inv, for: sel)
+        var ids = project?.solutionSelections[sel.key(s.id)].map { Set($0) } ?? s.initialSelection(inv, for: sel)
         if let raw = selectOverrides[sel.id] {
             switch raw {
             case "all": ids = Set(inv.vms.map(\.id))

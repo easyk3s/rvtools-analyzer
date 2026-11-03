@@ -44,6 +44,17 @@ enum SourceChecks {
         return (RawTable(name: raw.name, headers: headers, rows: rows), at + 2)
     }
 
+    /// Rows that repeat the RVTools header, left behind by moving a header up or by pasting exports together. Read as
+    /// data, one would be a VM called "VM". Returns nil when there are none.
+    static func removingRepeatedHeaders(_ raw: RawTable) -> (table: RawTable, removed: Int)? {
+        guard let columns = ColumnMatcher.canonicalColumns(for: raw.name) else { return nil }
+        let expected = Set(columns.map(Table.normalize))
+        let needed = max(5, expected.count / 2)
+        let rows = raw.rows.filter { Set($0.map(Table.normalize)).intersection(expected).count < needed }
+        guard rows.count < raw.rows.count else { return nil }
+        return (RawTable(name: raw.name, headers: raw.headers, rows: rows), raw.rows.count - rows.count)
+    }
+
     /// `tables` are one export's tabs once its columns are settled.
     static func evaluate(source: String, tables raws: [RawTable]) -> [SourceIssue] {
         var out: [SourceIssue] = []
@@ -57,16 +68,16 @@ enum SourceChecks {
         func dataRows(_ t: Table) -> [[String]] { t.rows.filter { r in r.filter { !$0.isEmpty }.count > 1 } }
 
         guard let info = table("vInfo") else {
-            add("no vInfo tab, so none of its VMs were read", "VM counts, capacity and every sizing leave out this export", level: .noVMsRead)
+            add("no vInfo tab, so none of its VMs were read", "VMs on other tabs were rebuilt from them, with fewer details, and start unselected in solutions", level: .noVMsRead)
             return out
         }
         let infoRows = dataRows(info)
         let cVM = info.col("VM")
         if infoRows.isEmpty {
-            add("vInfo has no rows, so none of its VMs were read", "VM counts, capacity and every sizing leave out this export", level: .noVMsRead)
+            add("vInfo has no rows, so none of its VMs were read", "VMs on other tabs were rebuilt from them, with fewer details, and start unselected in solutions", level: .noVMsRead)
         } else if cVM == nil {
             add("vInfo has no VM column, so its \(Fmt.int(infoRows.count)) row(s) couldn't be read as VMs",
-                "VM counts, capacity and every sizing leave out this export", level: .noVMsRead)
+                "VMs on other tabs were rebuilt from them, with fewer details, and start unselected in solutions", level: .noVMsRead)
         }
 
         // Columns that hold nothing on any row: a figure that's zero everywhere is a column that wasn't read.
@@ -99,7 +110,7 @@ enum SourceChecks {
             }
         }
 
-        // RVTools lists every VM on each VM tab, so a name that's only on the others was removed from vInfo.
+        // RVTools lists every VM on each VM tab, so a name that's only on the others was removed from vInfo (see `restoreVMsMissingFromVInfo`).
         if let cVM, !infoRows.isEmpty {
             let inInfo = Set(infoRows.map { $0.s(cVM) })
             var elsewhere = Set<String>()
@@ -115,8 +126,8 @@ enum SourceChecks {
                 }
                 let names = elsewhere.sorted().prefix(3).joined(separator: ", ")
                 let more = elsewhere.count > 3 ? " and \(Fmt.int(elsewhere.count - 3)) more" : ""
-                add("\(Fmt.int(elsewhere.count)) VM(s) on other tabs aren't in vInfo, so they weren't counted\(capacity > 0 ? " (\(Fmt.capacity(mib: capacity)) of disks)" : ""): \(names)\(more)",
-                    "VM counts, capacity and every sizing leave these VMs out. Rows may have been deleted from vInfo before the file was shared",
+                add("\(Fmt.int(elsewhere.count)) VM(s) on other tabs aren't in vInfo, so they were rebuilt from those tabs\(capacity > 0 ? " (\(Fmt.capacity(mib: capacity)) of disks)" : ""): \(names)\(more)",
+                    "They have fewer details, and solutions leave them out until you select them. Rows may have been deleted from vInfo before the file was shared",
                     // A handful can be VMs created or removed while RVTools was reading the tabs.
                     level: elsewhere.count * 100 < infoRows.count ? .note : .warning)
             }

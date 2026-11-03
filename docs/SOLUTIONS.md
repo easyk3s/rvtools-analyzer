@@ -345,6 +345,7 @@ Unknown values are `null`. Fields are only ever added within an API version.
 | `vcenter`, `datacenter`, `cluster`, `clusterId`, `clusterName`, `host`, `hostId`, `folder`, `resourcePool`, `vApp` | `clusterName` is "(no cluster)" for standalone hosts |
 | `powerState` | `on`, `off` or `suspended` |
 | `isRunning`, `isTemplate`, `isSRMPlaceholder`, `consolidationNeeded` | |
+| `notInVInfo` | Rebuilt from other tabs because its vInfo row is gone. It has fewer details, and starts unselected |
 | `isClusterAgent` | A vSphere Cluster Services agent VM ("vCLS-…"), created and managed by vCenter. Left out of the default selections. |
 | `os` | `{ name, family, familyLabel, configured, reportedByTools, endOfSupport }`. `family` is one of `windowsServer`, `windowsDesktop`, `rhel`, `ubuntuDebian`, `suse`, `otherLinux`, `appliance`, `unix` or `other` |
 | `cpus`, `sockets`, `coresPerSocket`, `memoryMiB` | configured size |
