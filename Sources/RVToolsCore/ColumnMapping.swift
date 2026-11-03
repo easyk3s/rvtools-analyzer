@@ -104,7 +104,7 @@ public enum ColumnMatcher {
         return ColumnPlan(file: file, tabs: known.map(tab))
     }
 
-    private static func canonicalColumns(for tab: String) -> [String]? {
+    static func canonicalColumns(for tab: String) -> [String]? {
         canonical.first { $0.key.caseInsensitiveCompare(tab) == .orderedSame }?.value
     }
 
