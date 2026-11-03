@@ -621,6 +621,8 @@ public struct Inventory: Sendable {
     public var checks: [ConsistencyCheck] = []
     /// Lower-cased names of the tabs in the export (empty for inventories not built from a dataset).
     public var tabsPresent: Set<String> = []
+    /// Problems found with the exports as they were read (see `SourceChecks`).
+    public var sourceIssues: [SourceIssue] = []
     /// Non-RVTools tools the data was translated from; empty for plain RVTools exports.
     public var sourceTools: [SourceTool] = []
 

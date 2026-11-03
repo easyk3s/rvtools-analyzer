@@ -63,6 +63,15 @@ public extension Solution {
         var result = run(vms: vms, selections: selections, inventory: inventory, params: Params(parameters, values))
         result.vmCount = Set(vms.map(\.id) + selections.values.flatMap { $0.map(\.id) }).count
         result.assumptions = parameters.map { ($0.group + " · " + $0.label, $0.display(values.values[$0.id] ?? $0.defaultValue, inventory: inventory)) }
+        // Every result and deck says so when the exports behind it didn't read cleanly, custom solutions included.
+        if !inventory.sourceIssues.isEmpty {
+            var b = CheckBuilder()
+            for (i, issue) in inventory.sourceIssues.enumerated() {
+                b.add("source-issue-\(i)", "Source data", issue.text, issue.level == .noVMsRead ? .blocker : .warning, issue.impact,
+                      remediation: "Check the export, then open it again.")
+            }
+            result.sections.insert(.checks("Source data problems", b.checks), at: 0)
+        }
         return result
     }
 }

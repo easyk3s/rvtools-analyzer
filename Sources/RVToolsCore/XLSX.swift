@@ -251,6 +251,9 @@ private final class SheetParser: NSObject, XMLParserDelegate {
         }
         var headers = rows[headerIndex].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         while let last = headers.last, last.isEmpty { headers.removeLast() }
+        // A first row much narrower than the rest is a title, not a header: keep the columns for `SourceChecks` to find.
+        let widest = rows.map { r in (r.lastIndex { !$0.isEmpty } ?? -1) + 1 }.max() ?? 0
+        if headers.count * 2 < widest { headers += Array(repeating: "", count: widest - headers.count) }
         for i in headers.indices where headers[i].isEmpty { headers[i] = "Column \(i + 1)" }
         let n = headers.count
         var body: [[String]] = []

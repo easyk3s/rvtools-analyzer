@@ -33,6 +33,7 @@ private final class Builder {
         inv.reportDate = ds.reportDate
         inv.tabsPresent = Set(ds.tableNames.map { $0.lowercased() })
         inv.sourceTools = ds.sourceTools
+        inv.sourceIssues = ds.sourceIssues.filter { $0.level != .note }
     }
 
     func run() -> Inventory {

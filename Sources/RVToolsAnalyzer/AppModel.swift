@@ -360,7 +360,8 @@ final class AppModel {
                             }
                             return
                         }
-                    } else if snapshots.count == 1, let only = snapshots.first {
+                    } else if snapshots.count == 1, let only = snapshots.first, only.dataset.columnPlans.isEmpty {
+                        // With unusual columns this falls through to the load below, so they're checked as with one file.
                         loaded = (only.dataset, only.inventory)
                     }
                 }
