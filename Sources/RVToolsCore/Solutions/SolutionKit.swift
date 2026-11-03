@@ -128,6 +128,8 @@ public struct SolutionParameter: Identifiable, Sendable {
         case multi([String])
         /// Clusters from the open export, stored by cluster id. `none` labels the empty choice (e.g. "Best fit (automatic)").
         case clusters(multi: Bool, none: String)
+        /// Pairs of clusters from the open export, stored as a flat list of cluster ids: A, B, A, B. A blank is a side not chosen yet.
+        case clusterPairs
         /// One host from the open export, stored by host id; hosts with the same CPU and memory are offered once.
         /// `none` labels the empty choice (e.g. "Typical host").
         case host(none: String)
@@ -163,6 +165,10 @@ public struct SolutionParameter: Identifiable, Sendable {
         SolutionParameter(id: id, group: group, label: label, help: help, kind: .clusters(multi: multi, none: none), defaultValue: .names([]))
     }
 
+    public static func clusterPairs(_ id: String, _ group: String, _ label: String, help: String = "") -> SolutionParameter {
+        SolutionParameter(id: id, group: group, label: label, help: help, kind: .clusterPairs, defaultValue: .names([]))
+    }
+
     public static func host(_ id: String, _ group: String, _ label: String, none: String, help: String = "") -> SolutionParameter {
         SolutionParameter(id: id, group: group, label: label, help: help, kind: .host(none: none), defaultValue: .names([]))
     }
@@ -178,6 +184,12 @@ public struct SolutionParameter: Identifiable, Sendable {
                 inventory?.clusters.first { $0.id == id }.map { "\($0.name) (\($0.vcenter))" } ?? String(id.split(separator: "|").last ?? Substring(id))
             }
             return names.isEmpty ? none : names.joined(separator: "; ")
+        case (.clusterPairs, .names(let ids)):
+            func name(_ id: String) -> String {
+                inventory?.clusters.first { $0.id == id }?.name ?? String(id.split(separator: "|").last ?? Substring(id))
+            }
+            let pairs = stride(from: 0, to: ids.count - 1, by: 2).filter { !ids[$0].isEmpty && !ids[$0 + 1].isEmpty }.map { "\(name(ids[$0])) ↔ \(name(ids[$0 + 1]))" }
+            return pairs.isEmpty ? "None" : pairs.joined(separator: "; ")
         case (.multi(let options), .selection(let chosen)):
             let names = chosen.filter { options.indices.contains($0) }.map { options[$0] }
             return names.isEmpty ? "None" : names.joined(separator: "; ")

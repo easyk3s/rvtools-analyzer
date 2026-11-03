@@ -156,6 +156,12 @@ public struct VCF9Sizing: Solution {
         .number("maxLoad", "Capacity", "Max CPU / memory load with those hosts down", 80, min: 50, max: 100, unit: "%"),
         .number("reserve", "Capacity", "Storage — host rebuild and operations reserve (vSAN)", 30, min: 0, max: 100, unit: "%"),
         .number("growth", "Capacity", "Storage — estimated growth", 10, min: 0, max: 200, unit: "%"),
+        .clusterPairs("pairs", "Advanced: HA cluster pairs", "HA cluster pairs",
+                      help: "For clusters that are two sites of one stretched cluster. Each pair is sized as one cluster that survives losing a whole site, a 50:50 split, instead of losing hosts. RVTools can't see sites, so this rests on what you know about the environment."),
+        .number("siteSpare", "Advanced: HA cluster pairs", "Host failures to tolerate on the surviving site", 0, min: 0, max: 3,
+                help: "For HA cluster pairs only. Replaces the host failures above for those pairs."),
+        .toggle("stretchMgmt", "Advanced: HA cluster pairs", "Stretch the management domain across the sites too", false,
+                help: "For HA cluster pairs only. Sizes the dedicated management hosts for a site failure, with equal hosts per site. vSAN management storage doubles and needs a witness at a third site."),
         .number("coreMin", "Licensing", "Licensed cores minimum per CPU", 16, min: 1, max: 64,
                 help: "VCF and VVF are licensed per core with a per-CPU minimum; the vSAN entitlement follows the licensed cores. Verify current terms."),
     ] }
@@ -184,6 +190,8 @@ public struct VCF9Sizing: Solution {
         var cluster = ""
         /// Licensed cores: the per-CPU minimum applied to each socket.
         var licensed = 0.0
+        /// Which side of an HA cluster pair this host is on; nil outside a pair.
+        var site: Int?
     }
 
     struct Fit {
@@ -211,8 +219,14 @@ public struct VCF9Sizing: Solution {
     }
 
     /// Worst CPU or memory load once the `spare` largest hosts are out; infinity if too few hosts remain.
-    static func load(_ hosts: [HostCap], _ d: Demand, spare: Int) -> Double {
+    /// With hosts on two sites, either site can be lost, so each must carry everything with `siteSpare` of its hosts out.
+    static func load(_ hosts: [HostCap], _ d: Demand, spare: Int, siteSpare: Int = 0) -> Double {
         if d.isEmpty { return 0 }
+        if hosts.contains(where: { $0.site != nil }) {
+            return [0, 1].map { side in
+                load(hosts.filter { $0.site == side }.map { h in var h = h; h.site = nil; return h }, d, spare: siteSpare)
+            }.max() ?? .infinity
+        }
         guard hosts.count > spare else { return .infinity }
         let cores = hosts.map(\.cores).sorted(by: >).dropFirst(spare).reduce(0, +)
         let ram = hosts.map(\.ramGiB).sorted(by: >).dropFirst(spare).reduce(0, +)
@@ -221,13 +235,33 @@ public struct VCF9Sizing: Solution {
     }
 
     /// Adds hosts like `typical` until the demand fits at `maxLoad` with at least `minHosts`.
-    static func fit(_ hosts: [HostCap], _ d: Demand, typical: HostCap, minHosts: Int, spare: Int, maxLoad: Double) -> Fit {
+    static func fit(_ hosts: [HostCap], _ d: Demand, typical: HostCap, minHosts: Int, spare: Int, siteSpare: Int = 0, maxLoad: Double) -> Fit {
         for k in 0...256 {
-            let pool = hosts + (0..<k).map { _ in newHost(typical) }
-            let l = load(pool, d, spare: spare)
+            let pool = adding(k, to: hosts, like: typical)
+            let l = load(pool, d, spare: spare, siteSpare: siteSpare)
             if pool.count >= minHosts && l <= maxLoad { return Fit(hosts: pool, newHosts: k, load: l) }
         }
-        return Fit(hosts: hosts, newHosts: -1, load: load(hosts, d, spare: spare))
+        return Fit(hosts: hosts, newHosts: -1, load: load(hosts, d, spare: spare, siteSpare: siteSpare))
+    }
+
+    /// New hosts like `typical`; in an HA cluster pair each goes to the site with fewer hosts, to keep the sites even.
+    static func adding(_ count: Int, to hosts: [HostCap], like typical: HostCap) -> [HostCap] {
+        var pool = hosts
+        let sited = hosts.contains { $0.site != nil }
+        for _ in 0..<max(count, 0) {
+            var h = newHost(typical)
+            if sited { h.site = pool.filter { $0.site == 0 }.count <= pool.filter { $0.site == 1 }.count ? 0 : 1 }
+            pool.append(h)
+        }
+        return pool
+    }
+
+    /// One host less, or one per site in an HA cluster pair.
+    static func fewer(_ hosts: [HostCap]) -> [HostCap] {
+        guard hosts.contains(where: { $0.site != nil }) else { return Array(hosts.dropLast()) }
+        var out = hosts
+        for side in [0, 1] { if let i = out.lastIndex(where: { $0.site == side }) { out.remove(at: i) } }
+        return out
     }
 
     static func newHost(_ typical: HostCap) -> HostCap {
@@ -238,18 +272,25 @@ public struct VCF9Sizing: Solution {
     /// Peels the smallest hosts off a cluster for the management domain, adding hosts like its typical one only when the
     /// management domain and the cluster's remaining workloads can't both fit.
     static func peel(_ cluster: Cluster, hosts: [HostCap], workload: Demand, hasVMs: Bool, mgmt: Demand, minMgmt: Int, minWorkload: Int,
-                     spare: Int, maxLoad: Double) -> PeelPlan? {
+                     spare: Int, siteSpare: Int = 0, stretchMgmt: Bool = false, maxLoad: Double) -> PeelPlan? {
         guard let typical = VCF9Sizing.typical(hosts) else { return nil }
         let wlMin = hasVMs || !workload.isEmpty ? minWorkload : 0
+        let sited = hosts.contains { $0.site != nil }
         for k in 0...256 {
-            let pool = (hosts + (0..<k).map { _ in newHost(typical) }).sorted { ($0.ramGiB, $0.cores, $0.name) < ($1.ramGiB, $1.cores, $1.name) }
+            var pool = adding(k, to: hosts, like: typical).sorted { ($0.ramGiB, $0.cores, $0.name) < ($1.ramGiB, $1.cores, $1.name) }
+            // An HA cluster pair gives up hosts from both sites alike, so taking from the front stays even.
+            if sited {
+                let a = pool.filter { $0.site == 0 }, b = pool.filter { $0.site == 1 }
+                pool = (0..<max(a.count, b.count)).flatMap { i in (i < a.count ? [a[i]] : []) + (i < b.count ? [b[i]] : []) }
+            }
             guard pool.count - wlMin >= minMgmt else { continue }
             for n in minMgmt...(pool.count - wlMin) {
-                let m = Array(pool[..<n])
-                let mLoad = load(m, mgmt, spare: spare)
+                if (sited || stretchMgmt) && n % 2 != 0 { continue }
+                let m = pool[..<n].enumerated().map { i, h in var h = h; h.site = stretchMgmt ? i % 2 : nil; return h }
+                let mLoad = load(m, mgmt, spare: spare, siteSpare: siteSpare)
                 guard mLoad <= maxLoad else { continue }
                 let rest = Array(pool[n...])
-                let rLoad = load(rest, workload, spare: spare)
+                let rLoad = load(rest, workload, spare: spare, siteSpare: siteSpare)
                 if rLoad <= maxLoad {
                     return PeelPlan(cluster: cluster, mgmt: m, remaining: rest, newHosts: k, mgmtLoad: mLoad, remainingLoad: rLoad)
                 }
@@ -397,6 +438,7 @@ public struct VCF9Sizing: Solution {
         let reserve = p.num("reserve") / 100, growth = p.num("growth") / 100
         let wldNSX = p.choice("wldNSX")
         let newVCenters = !vvf && p.choice("wldVC") == 0
+        let siteSpare = Int(p.num("siteSpare"))
 
         // Resolve a stored cluster (id, or a name from the CLI).
         func resolve(_ ref: String) -> Cluster? {
@@ -411,27 +453,56 @@ public struct VCF9Sizing: Solution {
         var clusters = inv.clusters.filter { scopeIDs.contains($0.id) && !$0.isStandalone && !(hostsByCluster[$0.id] ?? []).isEmpty }
             .sorted { ($0.vcenter.lowercased(), $0.name.lowercased()) < ($1.vcenter.lowercased(), $1.name.lowercased()) }
 
-        // Clusters to merge become one cluster everywhere: a management candidate (peeled or consolidated) and a
-        // workload cluster, with their hosts and workloads combined.
-        let mergeIDs = Set(p.names("merge").compactMap(resolve).map(\.id))
+        var memberIDs: [String: [String]] = [:]
+        /// One cluster everywhere from several: a management candidate (peeled or consolidated) and a workload cluster,
+        /// with their hosts and workloads combined.
+        func combine(_ parts: [Cluster], id: String, name: String) -> Cluster {
+            var m = Cluster(id: id)
+            m.name = name
+            var vcs: [String] = []
+            for c in parts where !vcs.contains(c.vcenter) { vcs.append(c.vcenter) }
+            m.vcenter = vcs.joined(separator: " + ")
+            m.vmCount = parts.reduce(0) { $0 + $1.vmCount }
+            m.hostCount = parts.reduce(0) { $0 + $1.hostCount }
+            hostsByCluster[m.id] = parts.flatMap { hostsByCluster[$0.id] ?? [] }
+            vmsByCluster[m.id] = parts.flatMap { vmsByCluster[$0.id] ?? [] }
+            memberIDs[m.id] = parts.map(\.id)
+            let ids = Set(parts.map(\.id))
+            clusters = clusters.filter { !ids.contains($0.id) } + [m]
+            if let pk = picked, ids.contains(pk.id) { picked = m }
+            return m
+        }
+
+        // HA cluster pairs: two clusters that are the sites of one stretched cluster, sized to survive losing a site.
+        // A side needn't have selected VMs: the passive site still brings its hosts.
+        let pairRefs = p.names("pairs")
+        var pairs: [(cluster: Cluster, a: Cluster, b: Cluster, refs: [String])] = []
+        var paired = Set<String>()
+        var siteByCluster: [String: Int] = [:]
+        for i in stride(from: 0, to: pairRefs.count - 1, by: 2) {
+            guard let a = resolve(pairRefs[i]), let b = resolve(pairRefs[i + 1]), a.id != b.id, !paired.contains(a.id), !paired.contains(b.id),
+                  ![a, b].contains(where: { $0.isStandalone || (hostsByCluster[$0.id] ?? []).isEmpty }) else { continue }
+            paired.formUnion([a.id, b.id])
+            siteByCluster[a.id] = 0
+            siteByCluster[b.id] = 1
+            let m = combine([a, b], id: "pair|\(a.id),\(b.id)", name: "\(a.name) ↔ \(b.name)")
+            pairs.append((m, a, b, [pairRefs[i], pairRefs[i + 1]]))
+        }
+        func isPair(_ c: Cluster) -> Bool { pairs.contains { $0.cluster.id == c.id } }
+        let stretchMgmt = !pairs.isEmpty && p.flag("stretchMgmt")
+        /// What a load figure assumes is down.
+        func downShort(_ hosts: [HostCap]) -> String {
+            guard hosts.contains(where: { $0.site != nil }) else { return "\(spare) down" }
+            return "a site" + (siteSpare > 0 ? " and \(siteSpare) more host(s)" : "") + " down"
+        }
+
+        // Clusters to merge are sized as one cluster.
+        let mergeIDs = Set(p.names("merge").compactMap(resolve).map(\.id)).subtracting(paired)
         let mergeMembers = inv.clusters.filter { mergeIDs.contains($0.id) && !$0.isStandalone && !(hostsByCluster[$0.id] ?? []).isEmpty }
             .sorted { ($0.vcenter.lowercased(), $0.name.lowercased()) < ($1.vcenter.lowercased(), $1.name.lowercased()) }
-        var memberIDs: [String: [String]] = [:]
-        if mergeMembers.count > 1 {
-            var m = Cluster(id: "merged|" + mergeMembers.map(\.id).joined(separator: ","))
-            m.name = mergeMembers.map(\.name).joined(separator: " + ")
-            var vcs: [String] = []
-            for c in mergeMembers where !vcs.contains(c.vcenter) { vcs.append(c.vcenter) }
-            m.vcenter = vcs.joined(separator: " + ")
-            m.vmCount = mergeMembers.reduce(0) { $0 + $1.vmCount }
-            m.hostCount = mergeMembers.reduce(0) { $0 + $1.hostCount }
-            hostsByCluster[m.id] = mergeMembers.flatMap { hostsByCluster[$0.id] ?? [] }
-            vmsByCluster[m.id] = mergeMembers.flatMap { vmsByCluster[$0.id] ?? [] }
-            memberIDs[m.id] = mergeMembers.map(\.id)
-            clusters = clusters.filter { !mergeIDs.contains($0.id) } + [m]
-            if let pk = picked, mergeIDs.contains(pk.id) { picked = m }
-        }
-        let mergedCluster = clusters.first { memberIDs[$0.id] != nil }
+        let mergedCluster = mergeMembers.count > 1
+            ? combine(mergeMembers, id: "merged|" + mergeMembers.map(\.id).joined(separator: ","), name: mergeMembers.map(\.name).joined(separator: " + "))
+            : nil
         func members(_ c: Cluster) -> [String] { memberIDs[c.id] ?? [c.id] }
         /// A reference for navigation; a merged cluster has no single object to open.
         func cref(_ c: Cluster, _ detail: String = "") -> AffectedObject {
@@ -442,7 +513,8 @@ public struct VCF9Sizing: Solution {
         func caps(_ c: Cluster) -> [HostCap] {
             (hostsByCluster[c.id] ?? []).filter { !$0.inferred && $0.cores > 0 && $0.memoryMiB > 0 }
                 .map { HostCap(id: $0.id, name: $0.name, cores: Double($0.cores), ramGiB: $0.memoryMiB / 1024, vendor: VCF9Sizing.vendor($0.cpuModel), cluster: $0.cluster,
-                               licensed: $0.sockets > 0 ? Double($0.sockets) * max(coreMin, Double($0.coresPerSocket)) : max(coreMin, Double($0.cores))) }
+                               licensed: $0.sockets > 0 ? Double($0.sockets) * max(coreMin, Double($0.coresPerSocket)) : max(coreMin, Double($0.cores)),
+                               site: siteByCluster[$0.clusterKey]) }
         }
         var basisFallback: [String] = []
         func workload(_ c: Cluster) -> Demand {
@@ -475,9 +547,17 @@ public struct VCF9Sizing: Solution {
             if s > 0 { return s }
             return c.map(hasVSAN) == true ? 1 : 3
         }
-        func minMgmt(_ kind: Int) -> Int { deploy.isHA ? 4 : (kind == 3 ? 2 : 3) }
+        func evenUp(_ n: Int) -> Int { n + n % 2 }
+        // Stretched over vSAN, VCF 9.1's design guide wants 8 hosts for a Highly Available management domain and 6 for a workload cluster.
+        func minMgmt(_ kind: Int, stretched: Bool = false) -> Int {
+            let single = deploy.isHA ? 4 : (kind == 3 ? 2 : 3)
+            return stretched ? (kind != 3 && deploy.isHA ? 8 : evenUp(single)) : single
+        }
         // VVF clusters stay under their vCenter, so only vSAN sets a minimum there.
-        func minWorkload(_ c: Cluster) -> Int { hasVSAN(c) ? 3 : (vvf ? 1 : 2) }
+        func minWorkload(_ c: Cluster) -> Int {
+            let single = hasVSAN(c) ? 3 : (vvf ? 1 : 2)
+            return isPair(c) ? (hasVSAN(c) && !vvf ? 6 : evenUp(single)) : single
+        }
 
         // Workload domains and their appliances (independent of which hosts the management domain takes).
         func domains(excluding mgmtCluster: Cluster?) -> [WorkloadDomain] {
@@ -547,13 +627,14 @@ public struct VCF9Sizing: Solution {
             guard let typical = VCF9Sizing.typical(hs) else { return nil }
             let wl = workload(c)
             let kind = storageKind(c)
-            let ded = components(consolidatedOn: nil, mgmtHosts: minMgmt(kind))
+            let ded = components(consolidatedOn: nil, mgmtHosts: minMgmt(kind, stretched: stretchMgmt))
             let plan = VCF9Sizing.peel(c, hosts: hs, workload: wl, hasVMs: !(vmsByCluster[c.id] ?? []).isEmpty, mgmt: mgmtDemand(ded.0),
-                                       minMgmt: minMgmt(kind), minWorkload: minWorkload(c), spare: spare, maxLoad: maxLoad)
+                                       minMgmt: minMgmt(kind, stretched: stretchMgmt), minWorkload: minWorkload(c), spare: spare, siteSpare: siteSpare,
+                                       stretchMgmt: stretchMgmt, maxLoad: maxLoad)
             let con = components(consolidatedOn: c, mgmtHosts: hs.count)
-            let fit = VCF9Sizing.fit(hs, wl + mgmtDemand(con.0), typical: typical, minHosts: minMgmt(kind), spare: spare, maxLoad: maxLoad)
+            let fit = VCF9Sizing.fit(hs, wl + mgmtDemand(con.0), typical: typical, minHosts: minMgmt(kind, stretched: isPair(c)), spare: spare, siteSpare: siteSpare, maxLoad: maxLoad)
             let (comps, wds) = dedicated ? ded : con
-            return Candidate(cluster: c, hosts: hs, workload: wl, currentLoad: VCF9Sizing.load(hs, wl, spare: spare), peel: plan,
+            return Candidate(cluster: c, hosts: hs, workload: wl, currentLoad: VCF9Sizing.load(hs, wl, spare: spare, siteSpare: siteSpare), peel: plan,
                              consolidated: fit, comps: comps, domains: wds)
         }
 
@@ -589,8 +670,10 @@ public struct VCF9Sizing: Solution {
 
         // Workbook storage: VM disk + swap, vSAN protection (FTT=1), rebuild / operations reserve, growth.
         let interim = totDisk + totRAM
+        // Stretched over vSAN, each site holds a full copy.
+        let mgmtStretched = dedicated ? stretchMgmt : isPair(chosen.cluster)
         // Rounded up at each step, as the workbook does.
-        let protected = (kind == 1 ? interim * 1.5 : (kind == 2 ? interim * 2 : interim)).rounded(.up)
+        let protected = ((kind == 1 ? interim * 1.5 : (kind == 2 ? interim * 2 : interim)) * (mgmtStretched && kind != 3 ? 2 : 1)).rounded(.up)
         let reserved = kind == 3 ? protected : (protected * (1 + reserve)).rounded(.up)
         let storageGB = (reserved * (1 + growth)).rounded(.up)
         let storageMiB = storageGB * 1024   // the workbook's GB are treated as GiB, like the host memory it sizes against
@@ -635,14 +718,14 @@ public struct VCF9Sizing: Solution {
                 let taken = plan.mgmt.filter { !$0.isNew }.count
                 if plan.newHosts == 0 {
                     b.add("mgmt.greenfield", mgmtArea, greenTitle, .ready,
-                          "\(taken) hosts from \(chosen.cluster.name) run the \(mgmtTerm) at \(Fmt.pct(plan.mgmtLoad * 100)) with \(spare) down; the other \(plan.remaining.count) carry its workloads at \(Fmt.pct(plan.remainingLoad * 100))")
+                          "\(taken) hosts from \(chosen.cluster.name) run the \(mgmtTerm) at \(Fmt.pct(plan.mgmtLoad * 100)) with \(downShort(plan.mgmt)); the other \(plan.remaining.count) carry its workloads at \(Fmt.pct(plan.remainingLoad * 100))" + (isPair(chosen.cluster) ? " with \(downShort(plan.remaining))" : ""))
                     headline = (vvf ? "Dedicated management cluster fits" : "Greenfield management domain fits") + ": \(taken) hosts from \(chosen.cluster.name), no new hosts"
                 } else {
                     let forMgmt = plan.mgmt.filter(\.isNew).count
                     let split = [forMgmt > 0 ? "\(forMgmt) for the \(mgmtTerm)" : "", plan.newHosts - forMgmt > 0 ? "\(plan.newHosts - forMgmt) for \(chosen.cluster.name)" : ""]
                         .filter { !$0.isEmpty }.joined(separator: ", ")
                     // When the minimum host count, not the appliances, sets the size, say so: the hosts look mostly idle otherwise.
-                    let minHosts = minMgmt(kind)
+                    let minHosts = minMgmt(kind, stretched: stretchMgmt)
                     let capacityHosts = VCF9Sizing.fit([], mgmt, typical: VCF9Sizing.typical(chosen.hosts)!, minHosts: 1, spare: spare, maxLoad: maxLoad).newHosts
                     let byMinimum = forMgmt > 0 && plan.mgmt.count == minHosts && capacityHosts >= 0 && capacityHosts < minHosts
                     let minimumNote = byMinimum
@@ -652,7 +735,7 @@ public struct VCF9Sizing: Solution {
                           "Not enough capacity for \(greenBuild): \(plan.newHosts) new host(s) needed (\(split)) — " + (taken == 0 ? "\(chosen.cluster.name) can't spare any of its \(chosen.hosts.count) hosts" : "\(chosen.cluster.name) can spare \(taken) of its \(chosen.hosts.count) hosts") + minimumNote,
                           remediation: "Free capacity on the other hosts (migrate or retire VMs), add hosts, or use a consolidated \(mgmtTerm)."
                               + (byMinimum && deploy.isHA ? " The Simple deployment model has a lower host minimum." : ""),
-                          affected: [cref(chosen.cluster, "workloads need \(Fmt.pct(chosen.currentLoad * 100)) of today's hosts with \(spare) down")],
+                          affected: [cref(chosen.cluster, "workloads need \(Fmt.pct(chosen.currentLoad * 100)) of today's hosts with \(downShort(chosen.hosts))")],
                           actions: toConsolidated)
                     headline = "Not enough capacity for \(greenBuild) — \(plan.newHosts) new host(s) needed (\(split))"
                 }
@@ -670,7 +753,7 @@ public struct VCF9Sizing: Solution {
             newHostsTotal += max(f.newHosts, 0)
             b.add("mgmt.consolidated", mgmtArea, "Consolidated \(mgmtTerm) capacity", f.newHosts == 0 ? .ready : .warning,
                   f.newHosts == 0
-                    ? "\(chosen.cluster.name) runs the management appliances and its workloads at \(Fmt.pct(f.load * 100)) with \(spare) host(s) down"
+                    ? "\(chosen.cluster.name) runs the management appliances and its workloads at \(Fmt.pct(f.load * 100)) with \(isPair(chosen.cluster) ? downShort(f.hosts) : "\(spare) host(s) down")"
                     : "\(chosen.cluster.name) needs \(f.newHosts) more host(s) to run the management appliances alongside its workloads",
                   remediation: f.newHosts == 0 ? "" : "Add hosts, reduce the workloads, or choose a larger cluster.")
             // VVF: consolidated is the default; a dedicated cluster is only raised when the consolidated cluster runs tight.
@@ -689,7 +772,7 @@ public struct VCF9Sizing: Solution {
                       remediation: recommendation, actions: toDedicated)
             }
             headline = f.newHosts == 0
-                ? "Consolidated: management and workloads on \(chosen.cluster.name) (\(f.hosts.count) hosts, \(Fmt.pct(f.load * 100)) with \(spare) down)"
+                ? "Consolidated: management and workloads on \(chosen.cluster.name) (\(f.hosts.count) hosts, \(Fmt.pct(f.load * 100)) with \(downShort(f.hosts)))"
                 : "Consolidated on \(chosen.cluster.name) needs \(f.newHosts) more host(s)"
         }
 
@@ -731,10 +814,10 @@ public struct VCF9Sizing: Solution {
         func liveHosts(_ c: Candidate) -> [HostCap] { dedicated && c.cluster.id == chosen.cluster.id ? (chosen.peel?.remaining ?? c.hosts) : c.hosts }
         /// Hosts the demand needs: drop the largest spare capacity while it still fits, or add hosts until it does.
         func hostsNeeded(_ hs: [HostCap], _ d: Demand, min: Int, typical: HostCap) -> (need: Int, fit: Fit) {
-            let f = VCF9Sizing.fit(hs, d, typical: typical, minHosts: min, spare: spare, maxLoad: maxLoad)
+            let f = VCF9Sizing.fit(hs, d, typical: typical, minHosts: min, spare: spare, siteSpare: siteSpare, maxLoad: maxLoad)
             guard f.newHosts == 0 else { return (f.hosts.count, f) }
             var trimmed = hs.sorted { ($0.ramGiB, $0.cores) > ($1.ramGiB, $1.cores) }
-            while trimmed.count > min, VCF9Sizing.load(Array(trimmed.dropLast()), d, spare: spare) <= maxLoad { trimmed.removeLast() }
+            while case let next = VCF9Sizing.fewer(trimmed), next.count >= min, next.count < trimmed.count, VCF9Sizing.load(next, d, spare: spare, siteSpare: siteSpare) <= maxLoad { trimmed = next }
             return (trimmed.count, f)
         }
 
@@ -747,6 +830,8 @@ public struct VCF9Sizing: Solution {
                                   typical: VCF9Sizing.typical(cand.hosts)!, note: dedicated && c.id == chosen.cluster.id ? " (after peel)" : ""))
             }
         }
+        let siteDownText = downShort([HostCap(id: "", name: "", cores: 0, ramGiB: 0, vendor: "", site: 0)])
+        let pairsDown = pairs.isEmpty ? "" : " (HA pairs: \(siteDownText))"
         var clusterRows: [[String]] = []
         var overloaded: [AffectedObject] = []
         var small: [AffectedObject] = []
@@ -754,11 +839,11 @@ public struct VCF9Sizing: Solution {
         for u in units {
             let (need, f) = hostsNeeded(u.hosts, u.demand, min: u.min, typical: u.typical)
             planHosts += f.hosts
-            let l = VCF9Sizing.load(u.hosts, u.demand, spare: spare)
+            let l = VCF9Sizing.load(u.hosts, u.demand, spare: spare, siteSpare: siteSpare)
             let obj = u.ref
             if f.newHosts > 0 {
                 newHostsTotal += f.newHosts
-                overloaded.append(AffectedObject(kind: obj.kind, id: obj.id, name: obj.name, detail: "\(l.isFinite ? Fmt.pct(l * 100) : "no failover host") with \(spare) down — add \(f.newHosts)"))
+                overloaded.append(AffectedObject(kind: obj.kind, id: obj.id, name: obj.name, detail: "\(l.isFinite ? Fmt.pct(l * 100) : "no failover host") with \(downShort(u.hosts)) — add \(f.newHosts)"))
             }
             if u.hosts.count < u.min {
                 small.append(AffectedObject(kind: obj.kind, id: obj.id, name: obj.name, detail: "\(u.hosts.count) hosts, \(u.min) minimum"))
@@ -770,11 +855,40 @@ public struct VCF9Sizing: Solution {
                                 l.isFinite ? Fmt.pct(l * 100) : "—", status])
         }
         let clusterRefs: [AffectedObject?] = units.map { $0.ref.kind == .cluster ? $0.ref : nil }
-        b.list("wld.capacity", wldArea, "Workload cluster capacity", .warning, noun: "clusters are over \(SFmt.num(maxLoad * 100))% with \(spare) host(s) down",
-               affected: overloaded, ready: "Every workload cluster fits with \(spare) host(s) down",
+        b.list("wld.capacity", wldArea, "Workload cluster capacity", .warning, noun: "clusters are over \(SFmt.num(maxLoad * 100))% with \(spare) host(s) down" + pairsDown,
+               affected: overloaded, ready: "Every workload cluster fits with \(spare) host(s) down" + pairsDown,
                remediation: "Add hosts, rebalance VMs between clusters, or merge clusters so they share failover capacity.")
         b.list("wld.size", wldArea, "Workload cluster minimum size", .warning, noun: "clusters below the \(edition) minimum", affected: small,
-               ready: "Every workload cluster meets the minimum host count", remediation: vvf ? "vSAN clusters need at least 3 hosts, or 2 with a witness appliance; the export doesn't show witnesses, so confirm before adding a host." : "VCF needs 3 hosts per vSAN cluster and 2 with external storage.")
+               ready: "Every workload cluster meets the minimum host count", remediation: vvf ? "vSAN clusters need at least 3 hosts, or 2 with a witness appliance; the export doesn't show witnesses, so confirm before adding a host." : "VCF needs 3 hosts per vSAN cluster and 2 with external storage." + (pairs.isEmpty ? "" : " HA pairs need an even host count; stretched over vSAN, VCF 9.1's design guide wants 6."))
+
+        if !pairs.isEmpty {
+            b.add("wld.pairs", wldArea, "HA cluster pairs set by hand", .warning,
+                  "\(pairs.map(\.cluster.name).joined(separator: "; ")) \(pairs.count == 1 ? "is" : "are") sized to survive losing a site. RVTools can't see sites or stretching, so this comes from what you entered, not the export",
+                  remediation: "Confirm each pair really is one stretched cluster, with half the capacity reserved for a site failure. Stretched vSAN also needs equal hosts per site, at least 10 Gbps and under 5 ms round trip between sites, and a witness at a third site.",
+                  affected: pairs.map { cref($0.cluster, "\($0.a.name) and \($0.b.name)") })
+            if !vvf && !mgmtStretched {
+                b.add("wld.pairs.mgmt", wldArea, "Stretch the management domain first", .warning,
+                      "VCF's stretched vSAN docs require the default management cluster to be stretched before a workload cluster is, but this plan's management domain isn't stretched",
+                      remediation: "Stretch the management domain under Assumptions, or confirm the requirement doesn't apply, for example to a metro storage cluster on external storage.",
+                      actions: dedicated ? [SolutionAction("Stretch the management domain", symbol: "arrow.left.and.right", set: ["stretchMgmt": .flag(true)])] : [])
+            }
+            let uneven = pairs.compactMap { pair -> AffectedObject? in
+                let a = caps(pair.a), b = caps(pair.b)
+                let cores = (a.reduce(0) { $0 + $1.cores }, b.reduce(0) { $0 + $1.cores }), ram = (a.reduce(0) { $0 + $1.ramGiB }, b.reduce(0) { $0 + $1.ramGiB })
+                guard a.count != b.count || abs(cores.0 - cores.1) > 0.1 * max(cores.0, cores.1) || abs(ram.0 - ram.1) > 0.1 * max(ram.0, ram.1) else { return nil }
+                return cref(pair.cluster, "\(a.count) hosts, \(SFmt.num(cores.0)) cores, \(SFmt.num(ram.0.rounded())) GiB and \(b.count) hosts, \(SFmt.num(cores.1)) cores, \(SFmt.num(ram.1.rounded())) GiB")
+            }
+            b.list("wld.pairs.balance", wldArea, "HA cluster pair balance", .warning, noun: "pair(s) have uneven sites, so the weaker site sets the load", affected: uneven,
+                   ready: "Both sites of every pair are about the same size", remediation: "Stretched clusters need the same number of hosts in each site, so either can carry the load after a failure.")
+            let mixed = pairs.compactMap { pair -> AffectedObject? in
+                let vendors = Set((caps(pair.a) + caps(pair.b)).map(\.vendor).filter { !$0.isEmpty })
+                return vendors.count > 1 ? cref(pair.cluster, vendors.sorted().joined(separator: ", ")) : nil
+            }
+            if !mixed.isEmpty {
+                b.list("wld.pairs.cpu", wldArea, "HA cluster pair CPU vendors", .blocker, noun: "pair(s) mix CPU vendors", affected: mixed, ready: "",
+                       remediation: "vMotion doesn't cross CPU vendors, so VMs couldn't move between the sites without a restart.")
+            }
+        }
 
         // vSAN entitlement: raw TiB per licensed core, pooled across the fleet, against the raw vSAN capacity in scope today.
         let tibPerCore = vvf ? A.vsanTiBPerCoreVVF : A.vsanTiBPerCoreVCF
@@ -860,7 +974,7 @@ public struct VCF9Sizing: Solution {
                            symbol: "server.rack", status: dedicated ? (greenfieldOK ? .ready : greenShort)
                                                                     : (chosen.consolidated.newHosts == 0 && (vvf || !dedicatedFits) ? .ready : .warning)),
             SolutionMetric("Management appliances", "\(SFmt.num(totCPU)) vCPU", "\(Fmt.memory(mib: totRAM * 1024)) RAM · \(Fmt.capacity(mib: totDisk * 1024)) disk", symbol: "cpu"),
-            SolutionMetric("Load with \(spare) host(s) down", mgmtLoad.isFinite ? Fmt.pct(mgmtLoad * 100) : "—", dedicated ? "management hosts" : "appliances + workloads", symbol: "gauge.with.dots.needle.50percent"),
+            SolutionMetric(mgmtHostList.contains { $0.site != nil } ? "Load with \(downShort(mgmtHostList))" : "Load with \(spare) host(s) down", mgmtLoad.isFinite ? Fmt.pct(mgmtLoad * 100) : "—", dedicated ? "management hosts" : "appliances + workloads", symbol: "gauge.with.dots.needle.50percent"),
             SolutionMetric("Management storage", Fmt.capacity(mib: storageMiB), "\(storageName) · \(SFmt.num(storageGB)) GB in workbook terms", symbol: "externaldrive"),
             vvf ? SolutionMetric("Workload clusters", Fmt.int(units.count), "under \(wds.count) vCenter(s)", symbol: "square.grid.2x2")
                 : SolutionMetric("Workload domains", Fmt.int(wds.count), "\(wds.reduce(0) { $0 + $1.clusters.count }) clusters · adds \(SFmt.num(wldAdds.reduce(0) { $0 + $1.cpu })) vCPU to management", symbol: "square.grid.2x2"),
@@ -887,17 +1001,20 @@ public struct VCF9Sizing: Solution {
                     SFmt.num(c.hosts.reduce(0) { $0 + $1.ramGiB }.rounded()), c.currentLoad.isFinite ? Fmt.pct(c.currentLoad * 100) : "—", green, cons, mark]
         }
         let merged = mergeMembers.map(\.id)
-        let pending = memberIDs.isEmpty ? mergeMembers.first : nil   // one cluster ticked, waiting for a second
+        let pending = mergedCluster == nil ? mergeMembers.first : nil   // one cluster ticked, waiting for a second
         let candActions: [[SolutionAction]] = candidates.map { c in
             var a: [SolutionAction] = []
             // Merge first so it lines up in one column; not every row offers "Use for management".
-            if candidates.count + mergeMembers.count > 1 {
-                if memberIDs[c.cluster.id] != nil {
+            if let pair = pairs.first(where: { $0.cluster.id == c.cluster.id }) {
+                let rest = pairs.filter { $0.cluster.id != pair.cluster.id }.flatMap(\.refs)
+                a.append(SolutionAction("Unpair", symbol: "arrow.triangle.branch", help: "Sizes these clusters separately again.", set: ["pairs": .names(rest)]))
+            } else if candidates.count + mergeMembers.count > 1 {
+                if mergedCluster?.id == c.cluster.id {
                     a.append(SolutionAction("Split", symbol: "arrow.triangle.branch", help: "Sizes these clusters separately again.", set: ["merge": .names([])]))
                 } else if pending?.id == c.cluster.id {
                     a.append(SolutionAction("Cancel merge", symbol: "xmark", set: ["merge": .names([])]))
                 } else {
-                    let with = memberIDs.isEmpty ? pending?.name : mergedCluster?.name
+                    let with = mergedCluster == nil ? pending?.name : mergedCluster?.name
                     a.append(SolutionAction(with.map { "Merge with \($0)" } ?? "Merge…", symbol: "arrow.triangle.merge",
                                             help: with == nil ? "Then choose another cluster to merge it with." : "Sizes these clusters as one cluster.",
                                             set: ["merge": .names(merged + [c.cluster.id])]))
@@ -914,7 +1031,7 @@ public struct VCF9Sizing: Solution {
         sections.append(.table(SolutionTable(
             id: "candidates", title: "\(mgmtArea) candidates",
             subtitle: (pending.map { "\($0.name) is waiting to be merged — choose another cluster to merge it with. " } ?? "")
-                + "Workload load is with \(spare) host(s) down; \(vvf ? "dedicated" : "greenfield") peels the smallest hosts off the cluster.",
+                + "Workload load is with \(spare) host(s) down\(pairsDown); \(vvf ? "dedicated" : "greenfield") peels the smallest hosts off the cluster.",
             columns: ["Cluster", "vCenter", "Hosts", "Cores", "RAM (GiB)", "Workload load", vvf ? "Dedicated" : "Greenfield", "Consolidated", ""],
             numeric: [2, 3, 4, 5], rows: candRows, rowRefs: candidates.map { memberIDs[$0.cluster.id] == nil ? cref($0.cluster) : nil }, rowActions: candActions)))
 
@@ -929,10 +1046,12 @@ public struct VCF9Sizing: Solution {
         // Management hosts.
         if !mgmtHostList.isEmpty {
             let load = dedicated ? mgmt : mgmt + chosen.workload
-            let perCPU = mgmtHostList.count > spare ? load.cores / Double(mgmtHostList.count - spare) : .infinity
-            let perRAM = mgmtHostList.count > spare ? load.ramGiB / Double(mgmtHostList.count - spare) : .infinity
+            let sited = mgmtHostList.contains { $0.site != nil }
+            let surviving = sited ? min(mgmtHostList.filter { $0.site == 0 }.count, mgmtHostList.filter { $0.site == 1 }.count) - siteSpare : mgmtHostList.count - spare
+            let perCPU = surviving > 0 ? load.cores / Double(surviving) : .infinity
+            let perRAM = surviving > 0 ? load.ramGiB / Double(surviving) : .infinity
             var rows = mgmtHostList.map { h in [h.name, h.isNew ? "New" : (h.cluster.isEmpty ? chosen.cluster.name : h.cluster), SFmt.num(h.cores), SFmt.num(h.ramGiB.rounded())] }
-            rows.append([dedicated ? "Management load per host" : "Load per host (appliances + workloads)", "\(spare) host(s) down", SFmt.num(perCPU.rounded(.up)), SFmt.num(perRAM.rounded(.up))])
+            rows.append([dedicated ? "Management load per host" : "Load per host (appliances + workloads)", sited ? downShort(mgmtHostList) : "\(spare) host(s) down", SFmt.num(perCPU.rounded(.up)), SFmt.num(perRAM.rounded(.up))])
             sections.append(.table(SolutionTable(
                 id: "mgmt-hosts", title: dedicated ? "\(mgmtArea) hosts" : "Consolidated cluster hosts",
                 subtitle: dedicated ? "Appliances at \(SFmt.num(mgmtRatio)):1 vCPU per core" : "Appliances at \(SFmt.num(mgmtRatio)):1 plus the cluster's workloads",
@@ -946,7 +1065,7 @@ public struct VCF9Sizing: Solution {
             ["Swap (appliance memory)", SFmt.num(totRAM)],
         ]
         if kind != 3 {
-            storRows.append(["vSAN protection (FTT=1, \(kind == 1 ? "×1.5 ESA" : "×2 OSA"))", SFmt.num(protected.rounded(.up))])
+            storRows.append(["vSAN protection (FTT=1, \(kind == 1 ? "×1.5 ESA" : "×2 OSA")\(mgmtStretched ? ", ×2 for the second site" : ""))", SFmt.num(protected.rounded(.up))])
             storRows.append(["Rebuild and operations reserve (\(SFmt.num(reserve * 100))%)", SFmt.num(reserved.rounded(.up))])
         }
         storRows.append(["With \(SFmt.num(growth * 100))% growth", SFmt.num(storageGB)])
@@ -967,9 +1086,24 @@ public struct VCF9Sizing: Solution {
                     columns: ["Domain", "Clusters", "Hosts", "VMs", "vCenter", "NSX Managers", "Adds to management"], numeric: [2, 3], rows: rows)))
             }
             sections.append(.table(SolutionTable(
-                id: "workload-clusters", title: "Workload clusters", subtitle: "Existing workloads with \(spare) host(s) down, at most \(SFmt.num(maxLoad * 100))%",
+                id: "workload-clusters", title: "Workload clusters", subtitle: "Existing workloads with \(spare) host(s) down\(pairsDown), at most \(SFmt.num(maxLoad * 100))%",
                 columns: ["Cluster", vvf ? "vCenter" : "Domain", "Hosts", "Demand (cores)", "Demand (GiB)", "Load", "Capacity"], numeric: [2, 3, 4, 5],
                 rows: clusterRows, rowRefs: clusterRefs)))
+        }
+        if !pairs.isEmpty {
+            // What the pair costs: the same hosts and workloads, against ordinary host failures.
+            let rows = pairs.compactMap { pair -> [String]? in
+                guard let cand = candidateByID[pair.cluster.id] else { return nil }
+                let hs = liveHosts(cand)
+                let siteDown = VCF9Sizing.load(hs, cand.workload, spare: spare, siteSpare: siteSpare)
+                let hostsDown = VCF9Sizing.load(hs.map { h in var h = h; h.site = nil; return h }, cand.workload, spare: spare)
+                func side(_ s: Int) -> String { "\(hs.filter { $0.site == s }.count) hosts" }
+                return [pair.a.name, side(0), pair.b.name, side(1), siteDown.isFinite ? Fmt.pct(siteDown * 100) : "—", hostsDown.isFinite ? Fmt.pct(hostsDown * 100) : "—"]
+            }
+            sections.append(.table(SolutionTable(
+                id: "ha-pairs", title: "HA cluster pairs", subtitle: "Set by hand under Assumptions: the export can't show that these are stretched",
+                columns: ["Site A", "Hosts", "Site B", "Hosts", "Load with \(siteDownText)", "Load with \(spare) host(s) down"],
+                numeric: [1, 3, 4, 5], rows: rows)))
         }
         if !mergeRows.isEmpty {
             sections.append(.table(SolutionTable(id: "merge", title: "Merged cluster", columns: ["", "Value"], numeric: [1], rows: mergeRows)))
@@ -1001,6 +1135,9 @@ public struct VCF9Sizing: Solution {
             notes.append("A dedicated management cluster is still recommended for VVF where hosts can be spared. " + (plan.newHosts == 0
                 ? "\(bestPeel.cluster.name) could give up \(plan.mgmt.count) hosts for one and still carry its workloads at \(Fmt.pct(plan.remainingLoad * 100)) with \(spare) down."
                 : "Here it would need \(plan.newHosts) new host(s)."))
+        }
+        if !pairs.isEmpty {
+            notes.append("HA cluster pairs are sized so either site can carry both clusters' workloads alone, at most \(SFmt.num(maxLoad * 100))%, with \(siteSpare) more host(s) out on that site. Other clusters still keep \(spare) host(s) in reserve.")
         }
         if !isAuto { notes.insert("Management cluster chosen under Assumptions; best fit would be \(best.cluster.name).", at: 0) }
         sections.append(.notes("About this sizing", notes))

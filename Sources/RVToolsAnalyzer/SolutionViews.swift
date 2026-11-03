@@ -480,6 +480,7 @@ private struct ParameterRow: View {
     let parameter: SolutionParameter
     @Binding var values: ParamValues
 
+    @State private var confirmingPairs = false
     private var current: ParamValue { values.values[parameter.id] ?? parameter.defaultValue }
 
     private var currentNumber: Double? {
@@ -542,6 +543,50 @@ private struct ParameterRow: View {
                 ForEach(clusters) { Text(label($0)).tag($0.id) }
                 ForEach(missing, id: \.self) { Text("\(String($0.split(separator: "|").last ?? "")) — not in this export").tag($0) }
             }
+        }
+    }
+
+    /// Rows of two clusters, each usable once. Starting needs a confirmation: the export can't back this up.
+    @ViewBuilder private func clusterPairPicker() -> some View {
+        let clusters = (model.report?.inventory.clusters ?? []).filter { !$0.isStandalone && $0.hostCount > 0 }
+            .sorted { ($0.vcenter.lowercased(), $0.name.lowercased()) < ($1.vcenter.lowercased(), $1.name.lowercased()) }
+        let chosen: [String] = { if case .names(let n) = current { return n }; return [] }()
+        let known = Set(clusters.map(\.id))
+        Text(parameter.label)
+        ForEach(Array(stride(from: 0, to: chosen.count - 1, by: 2)), id: \.self) { row in
+            HStack {
+                ForEach([row, row + 1], id: \.self) { i in
+                    Picker(i == row ? "Site A" : "Site B", selection: Binding<String>(
+                        get: { chosen[i] },
+                        set: { var n = chosen; n[i] = $0; values.values[parameter.id] = .names(n) })) {
+                        Text("Choose…").tag("")
+                        ForEach(clusters.filter { $0.id == chosen[i] || !chosen.contains($0.id) }) {
+                            Text("\($0.name) (\($0.vcenter)) · \($0.hostCount) hosts").tag($0.id)
+                        }
+                        if !chosen[i].isEmpty && !known.contains(chosen[i]) {
+                            Text("\(String(chosen[i].split(separator: "|").last ?? "")) — not in this export").tag(chosen[i])
+                        }
+                    }
+                }
+                Button {
+                    var n = chosen
+                    n.removeSubrange(row...(row + 1))
+                    values.values[parameter.id] = .names(n)
+                } label: { Image(systemName: "minus.circle") }
+                .buttonStyle(.borderless)
+                .help("Remove this pair")
+            }
+        }
+        Button(chosen.isEmpty ? "Pair clusters…" : "Add pair") {
+            if chosen.isEmpty { confirmingPairs = true } else { values.values[parameter.id] = .names(chosen + ["", ""]) }
+        }
+        .controlSize(.small)
+        .disabled(clusters.count - chosen.filter { !$0.isEmpty }.count < 2)
+        .alert("Size clusters as HA pairs?", isPresented: $confirmingPairs) {
+            Button("Pair Clusters") { values.values[parameter.id] = .names(["", ""]) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This is an advanced option. RVTools can't see sites or stretched clusters, so make sure you know these clusters really are one stretched cluster across two sites. Each pair is sized to survive losing a whole site instead of a few hosts, which can change the host count and licensing a lot. The results will say this was set by hand.")
         }
     }
 
@@ -611,6 +656,8 @@ private struct ParameterRow: View {
                 }
             case .clusters(let multi, let none):
                 clusterPicker(multi: multi, none: none)
+            case .clusterPairs:
+                clusterPairPicker()
             case .host(let none):
                 hostPicker(none: none)
             }
