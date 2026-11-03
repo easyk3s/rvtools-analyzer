@@ -49,6 +49,12 @@ public extension Solution {
         defaultSelection(inventory)
     }
 
+    /// The default selection, without VMs rebuilt from other tabs: someone removed those from vInfo, so they're only
+    /// included when chosen.
+    func initialSelection(_ inventory: Inventory, for selection: SolutionSelection) -> Set<String> {
+        defaultSelection(inventory, for: selection).subtracting(inventory.vms.filter(\.notInVInfo).map(\.id))
+    }
+
     func run(vms: [VM], selections: [String: [VM]], inventory: Inventory, params: Params) -> SolutionResult {
         run(vms: vms, inventory: inventory, params: params)
     }
@@ -94,7 +100,7 @@ public enum SolutionCatalog {
         if var scripted = s as? ScriptedSolution { scripted.isCompanion = true; s = scripted }
         var selected: [String: [VM]] = [:]
         for sel in s.selections {
-            let ids = selections?[sel.id] ?? s.defaultSelection(inventory, for: sel)
+            let ids = selections?[sel.id] ?? s.initialSelection(inventory, for: sel)
             selected[sel.id] = inventory.vms.filter { ids.contains($0.id) }
         }
         return s.run(vms: selected[s.selections[0].id] ?? [], selections: selected, inventory: inventory, values: values)

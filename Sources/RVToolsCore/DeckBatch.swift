@@ -78,7 +78,7 @@ public enum DeckBatch {
             if var scripted = found as? ScriptedSolution { scripted.findings = r.groups; s = scripted }
             var selections: [String: [VM]] = [:]
             for sel in s.selections {
-                let ids = s.defaultSelection(inv, for: sel)
+                let ids = s.initialSelection(inv, for: sel)
                 selections[sel.id] = inv.vms.filter { ids.contains($0.id) }
             }
             var notes: [String] = []

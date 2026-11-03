@@ -196,6 +196,11 @@ public final class Dataset: @unchecked Sendable {
                     ds.warnings.append("\(file.lastPathComponent): \(tables[i].name)'s header was at row \(Fmt.int(restored.row)), not the first row, probably from sorting the tab with its header. It was read as the header and the other rows as data")
                     tables[i] = restored.table
                 }
+                for i in tables.indices {
+                    guard let cleaned = SourceChecks.removingRepeatedHeaders(tables[i]) else { continue }
+                    ds.warnings.append("\(file.lastPathComponent): \(tables[i].name) repeats its header on \(Fmt.int(cleaned.removed)) other row(s), which weren't read as data")
+                    tables[i] = cleaned.table
+                }
                 if let proposed = ColumnMatcher.plan(for: tables, file: file.lastPathComponent) {
                     let plan: ColumnPlan
                     if let saved {

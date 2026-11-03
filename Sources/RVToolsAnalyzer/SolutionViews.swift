@@ -394,7 +394,7 @@ struct VMSelectionView: View {
             Group {
                 TableColumn("✓", sortUsing: KeyPathComparator(\VM.name)) { (vm: VM) in IncludeToggle(id: vm.id, selection: $selection) }.width(26)
                 TableColumn("Name", sortUsing: KeyPathComparator(\VM.name)) { (vm: VM) in
-                    SelectionNameCell(vm: vm, badges: badges.filter { $0.ids.contains(vm.id) }.map(\.label))
+                    SelectionNameCell(vm: vm, badges: badges.filter { $0.ids.contains(vm.id) }.map(\.label) + (vm.notInVInfo ? ["Not in vInfo"] : []))
                 }
                 .width(min: 150, ideal: badges.isEmpty ? 220 : 300)
                 TableColumn("Cluster", sortUsing: KeyPathComparator(\VM.cluster)) { (vm: VM) in Text(vm.cluster) }
