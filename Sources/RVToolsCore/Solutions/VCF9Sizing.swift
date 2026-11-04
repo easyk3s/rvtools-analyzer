@@ -281,7 +281,13 @@ public struct VCF9Sizing: Solution {
             // An HA cluster pair gives up hosts from both sites alike, so taking from the front stays even.
             if sited {
                 let a = pool.filter { $0.site == 0 }, b = pool.filter { $0.site == 1 }
-                pool = (0..<max(a.count, b.count)).flatMap { i in (i < a.count ? [a[i]] : []) + (i < b.count ? [b[i]] : []) }
+                // A plain loop, as older compilers time out type-checking this as a flatMap of conditional arrays.
+                var alternating: [HostCap] = []
+                for i in 0..<max(a.count, b.count) {
+                    if i < a.count { alternating.append(a[i]) }
+                    if i < b.count { alternating.append(b[i]) }
+                }
+                pool = alternating
             }
             guard pool.count - wlMin >= minMgmt else { continue }
             for n in minMgmt...(pool.count - wlMin) {
