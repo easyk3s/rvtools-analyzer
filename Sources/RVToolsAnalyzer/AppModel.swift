@@ -1075,8 +1075,8 @@ final class AppModel {
         let companions = (s as? ScriptedSolution)?.companions ?? []
         let companionState: [String: (selections: [String: Set<String>], values: ParamValues)] = Dictionary(uniqueKeysWithValues: companions.compactMap { id in
             SolutionCatalog.solution(id: id).map { c in
-                (id, (Dictionary(uniqueKeysWithValues: c.selections.compactMap { sel in solutionSelections[sel.key(id)].map { (sel.id, $0) } }),
-                      solutionParams[id] ?? ParamValues()))
+                (id, (selections: Dictionary(uniqueKeysWithValues: c.selections.compactMap { sel in solutionSelections[sel.key(id)].map { (sel.id, $0) } }),
+                      values: solutionParams[id] ?? ParamValues()))
             }
         })
         let companionKey = companions.map { id in
