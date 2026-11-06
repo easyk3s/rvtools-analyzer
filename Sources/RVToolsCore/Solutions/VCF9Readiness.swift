@@ -136,7 +136,7 @@ public struct VCF9Readiness: Solution {
         let hosts = scopeHosts.filter { !$0.isVirtual }
         let hostIDs = Set(scopeHosts.map(\.id))
         let servers = Set(vms.map { $0.vcenter.lowercased() })
-        let vcenters = inv.vcenters.filter { servers.contains($0.server.lowercased()) }
+        let vcenters = inv.vcenters.filter { $0.kind != .esxiHost && servers.contains($0.server.lowercased()) }
         let vmDatastores = Set(vms.flatMap { vm in vm.datastores.map { vm.vcenter.lowercased() + "|" + $0.lowercased() } })
         let datastores = inv.datastores.filter { $0.hostKeys.contains(where: hostIDs.contains) || vmDatastores.contains($0.id) }
         let pgByID = Dictionary(inv.portGroups.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -176,7 +176,8 @@ public struct VCF9Readiness: Solution {
             b.aggregate("vc.location", vcArea, "vCenter VM runs on a cluster it manages", noun: "vCenter VMs run under another vCenter",
                         items: found.map { vc, vm in
                             let same = vm.vcenter.lowercased() == vc.server.lowercased()
-                            return (same ? .ready : .blocker, AffectedObject(kind: .vcenter, id: vc.id, name: vc.server,
+                            // Which vCenter an inferred one really is, and what it manages, is a guess: not enough to block on.
+                            return (same ? .ready : vc.kind == .inferred ? .info : .blocker, AffectedObject(kind: .vcenter, id: vc.id, name: vc.server,
                                                                               detail: same ? "\(vm.name) on \(clusterName(inv, vm))" : "\(vm.name) runs under \(vm.vcenter) (\(clusterName(inv, vm)))"))
                         },
                         ready: "Every vCenter VM found runs on a cluster managed by that vCenter",

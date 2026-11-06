@@ -42,10 +42,14 @@ public enum TrendLoader {
         let ids = TrendAnalyzer.serverIdentities(loaded.map { TrendSnapshot(id: 0, date: $0.0.reportDate, dataset: $0.0, inventory: $0.1) })
         var groups: [[(Dataset, Inventory)]] = []
         for item in loaded {
-            let servers = Set(item.1.vcenters.map { TrendAnalyzer.canonicalServer($0.server, identities: ids) })
+            // Exports of different hosts under one inferred vCenter are still different parts of the environment.
+            func parts(_ inv: Inventory) -> Set<String> {
+                Set(inv.vcenters.flatMap { $0.kind == .inferred ? $0.sourceHosts : [TrendAnalyzer.canonicalServer($0.server, identities: ids)] })
+            }
+            let servers = parts(item.1)
             if let group = groups.last, let first = group.first,
                item.0.reportDate.timeIntervalSince(first.0.reportDate) <= combineWindow,
-               group.allSatisfy({ Set($0.1.vcenters.map { TrendAnalyzer.canonicalServer($0.server, identities: ids) }).isDisjoint(with: servers) }) {
+               group.allSatisfy({ parts($0.1).isDisjoint(with: servers) }) {
                 groups[groups.count - 1].append(item)
             } else {
                 groups.append([item])

@@ -1,0 +1,22 @@
+name: Swift
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: swift build
+    - name: Smoke test the CLI on a sample export
+      run: swift run rvtools-cli samples/RVTools_export_all_2026-09-01_09.30.00.xlsx

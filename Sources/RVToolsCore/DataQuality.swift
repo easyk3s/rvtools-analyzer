@@ -151,6 +151,10 @@ public struct DataQuality: Sendable {
         }
 
         q.gaps.sort { ($0.kind, -$0.affected, $0.area, $0.title) < ($1.kind, -$1.affected, $1.area, $1.title) }
+        // First, whatever the counts: figures above can look complete while a whole export is left out of them.
+        q.gaps.insert(contentsOf: inv.sourceIssues.sorted { $0.level == .noVMsRead && $1.level != .noVMsRead }.map {
+            DataGap(kind: .missing, area: "Export", title: $0.text, affected: 0, total: 0, fallback: "", impact: $0.impact)
+        }, at: 0)
         return q
     }
 

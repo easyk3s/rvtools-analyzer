@@ -21,6 +21,8 @@ private final class Builder {
     var hostByBareName: [String: [Int]] = [:]
     var clusterIndex: [String: Int] = [:]
     var dsIndex: [String: Int] = [:]
+    /// Per host and name, for ESXi host exports, where two hosts' local datastores can share a name.
+    var dsByHost: [String: Int] = [:]
     var pgIndex: [String: Int] = [:]
     var vcIndex: [String: Int] = [:]
     /// Per-VM figures from other tabs, kept to fill blanks in vInfo (see `fillMissingFigures`).
@@ -33,6 +35,7 @@ private final class Builder {
         inv.reportDate = ds.reportDate
         inv.tabsPresent = Set(ds.tableNames.map { $0.lowercased() })
         inv.sourceTools = ds.sourceTools
+        inv.sourceIssues = ds.sourceIssues.filter { $0.level != .note }
     }
 
     func run() -> Inventory {
@@ -40,6 +43,7 @@ private final class Builder {
         buildHosts()
         buildClusters()
         buildVMs()
+        restoreVMsMissingFromVInfo()
         inferHosts()
         attachVMChildren()
         buildDatastores()
@@ -129,9 +133,17 @@ private final class Builder {
                 for r in other.rows where !r.s(u).isEmpty && serverByUUID[r.s(u)] == nil { serverByUUID[r.s(u)] = r.s(s) }
             }
         }
+        let cSource = t.col(HostExportPlan.sourceColumn)
         for r in t.rows {
             let server = r.s(cServer).isEmpty ? (serverByUUID[r.s(cUUID)] ?? r.s(cName)) : r.s(cServer)
             let i = ensureVCenter(server)
+            // A host regrouped under a vCenter describes the host: none of this is the vCenter's.
+            if !r.s(cSource).isEmpty {
+                if inv.vcenters[i].fullName.isEmpty { inv.vcenters[i].kind = .inferred }
+                inv.vcenters[i].sourceHosts.append(r.s(cSource))
+                continue
+            }
+            inv.vcenters[i].kind = HostExportPlan.isHostRow(r, in: t) ? .esxiHost : .vCenter
             inv.vcenters[i].fullName = r.s(cFull)
             inv.vcenters[i].version = cVersion == nil ? (r.s(cFull).range(of: #"\d+\.\d+(\.\d+)*"#, options: .regularExpression).map { String(r.s(cFull)[$0]) } ?? "") : r.s(cVersion)
             inv.vcenters[i].build = r.s(cBuild)
@@ -282,14 +294,7 @@ private final class Builder {
             vm.datacenter = r.s(cDC)
             vm.cluster = r.s(cCluster)
             vm.host = r.s(cHost)
-            if let hi = matchHost(server, vm.host) {
-                vm.hostKey = inv.hosts[hi].id
-                vm.clusterKey = inv.hosts[hi].clusterKey
-                if vm.datacenter.isEmpty { vm.datacenter = inv.hosts[hi].datacenter }
-            } else {
-                vm.hostKey = key(server, vm.host)
-                vm.clusterKey = Builder.clusterID(server, vm.datacenter, vm.cluster)
-            }
+            place(&vm)
             vm.folder = r.s(cFolder)
             vm.resourcePool = r.s(cRP)
             vm.vApp = r.s(cVApp)
@@ -334,20 +339,86 @@ private final class Builder {
             for c in cNets { let n = r.s(c); if !n.isEmpty, !vm.networks.contains(n) { vm.networks.append(n) } }
             if let d = Parse.datastore(fromPath: vm.vmxPath) { vm.datastores.append(d) }
 
-            inv.vms.append(vm)
-            let idx = inv.vms.count - 1
-            vInfoDiskTotal[idx] = r.d0(cDiskTotal)
-            vmIDs.insert(id)
-            if !vmid.isEmpty { vmByID[key(server, vmid)] = idx }
-            if !uuid.isEmpty { vmByUUID[key(server, uuid)] = idx }
-            vmByName[key(server, name)] = idx
-            vmByBareName[name.lowercased(), default: []].append(idx)
+            vInfoDiskTotal[inv.vms.count] = r.d0(cDiskTotal)
+            add(vm)
         }
         for vm in inv.vms { ensureCluster(server: vm.vcenter, datacenter: vm.datacenter, name: vm.cluster.isEmpty && vm.clusterKey.contains("~standalone") ? "" : vm.cluster) }
 
         let withHost = inv.vms.filter { !$0.host.isEmpty }
         let hostMatched = withHost.filter { hostIndex[$0.hostKey] != nil }.count
         inv.joins.append(JoinStat(source: t.name, target: "Host (vHost)", keys: "VI SDK Server + Host", matched: hostMatched, total: withHost.count))
+    }
+
+    /// Sets a VM's host and cluster keys from its vCenter, host, cluster and datacenter names.
+    func place(_ vm: inout VM) {
+        if let hi = matchHost(vm.vcenter, vm.host) {
+            vm.hostKey = inv.hosts[hi].id
+            vm.clusterKey = inv.hosts[hi].clusterKey
+            if vm.datacenter.isEmpty { vm.datacenter = inv.hosts[hi].datacenter }
+        } else {
+            vm.hostKey = key(vm.vcenter, vm.host)
+            vm.clusterKey = Builder.clusterID(vm.vcenter, vm.datacenter, vm.cluster)
+        }
+    }
+
+    func add(_ vm: VM) {
+        let idx = inv.vms.count
+        inv.vms.append(vm)
+        vmIDs.insert(vm.id)
+        if !vm.vmID.isEmpty { vmByID[key(vm.vcenter, vm.vmID)] = idx }
+        if !vm.uuid.isEmpty { vmByUUID[key(vm.vcenter, vm.uuid)] = idx }
+        vmByName[key(vm.vcenter, vm.name)] = idx
+        vmByBareName[vm.name.lowercased(), default: []].append(idx)
+    }
+
+    /// RVTools lists every VM on each VM tab, so a VM that's on the others but not in vInfo had its row removed. It's
+    /// rebuilt from those tabs here, before they're joined, so their rows attach to it instead of to a VM with the same
+    /// name in another vCenter. Its figures are filled in like any other blank (see `fillMissingFigures`).
+    func restoreVMsMissingFromVInfo() {
+        guard ds.sourceTools.isEmpty else { return }
+        for tab in ["vCPU", "vMemory", "vDisk", "vTools"] {
+            guard let t = ds.table(tab), let cVM = t.col("VM") else { continue }
+            let cServer = t.col("VI SDK Server"), cVMID = t.col("VM ID"), cUUID = t.col("VM UUID")
+            let cPower = t.col("Powerstate"), cTemplate = t.col("Template"), cSRM = t.col("SRM Placeholder")
+            let cDC = t.col("Datacenter"), cCluster = t.col("Cluster"), cHost = t.col("Host"), cFolder = t.col("Folder")
+            let cNote = t.col("Annotation"), cOSConf = t.col("OS according to the configuration file", "OS"), cOSTools = t.col("OS according to the VMware Tools")
+            let cCustom = t.customColumns.sorted()
+            for (ri, r) in t.rows.enumerated() {
+                let server = r.s(cServer), name = r.s(cVM), vmid = r.s(cVMID), uuid = r.s(cUUID)
+                guard !name.isEmpty, r.filter({ !$0.isEmpty }).count > 1 else { continue }
+                if !vmid.isEmpty, vmByID[key(server, vmid)] != nil { continue }
+                if !uuid.isEmpty, vmByUUID[key(server, uuid)] != nil { continue }
+                // Two VMs can share a name, so a name only settles it when there's no VM ID to tell them apart.
+                if let i = vmByName[key(server, name)], vmid.isEmpty || inv.vms[i].vmID.isEmpty { continue }
+                ensureVCenter(server)
+                var id = !vmid.isEmpty ? key(server, vmid) : (!uuid.isEmpty ? key(server, "uuid:" + uuid) : key(server, "name:\(name)"))
+                if vmIDs.contains(id) { id += "#\(tab)\(ri)" }
+                var vm = VM(id: id)
+                vm.notInVInfo = true
+                vm.name = name
+                vm.vcenter = server
+                vm.datacenter = r.s(cDC)
+                vm.cluster = r.s(cCluster)
+                vm.host = r.s(cHost)
+                place(&vm)
+                vm.folder = r.s(cFolder)
+                vm.powerState = PowerState(raw: r.s(cPower))
+                vm.isTemplate = r.b(cTemplate) ?? false
+                vm.isSRMPlaceholder = r.b(cSRM) ?? false
+                vm.annotation = r.s(cNote)
+                for c in cCustom {
+                    let value = r.s(c).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !value.isEmpty { vm.customFields.append(VCustomField(name: t.headers[c], value: value)) }
+                }
+                vm.osConfig = r.s(cOSConf)
+                vm.osTools = r.s(cOSTools)
+                vm.os = Lifecycle.classify(config: vm.osConfig, tools: vm.osTools)
+                vm.vmID = vmid
+                vm.uuid = uuid
+                add(vm)
+                ensureCluster(server: vm.vcenter, datacenter: vm.datacenter, name: vm.cluster)
+            }
+        }
     }
 
     /// Without vHost, hosts are still named on every VM row: keep them as placeholders so placement, maps and
@@ -526,10 +597,17 @@ private final class Builder {
             let cSIOC = t.col("SIOC enabled"), cHosts = t.col("Hosts"), cDSC = t.col("Cluster name"), cMajor = t.col("Major Version")
             let cURL = t.col("URL")
             var refs = 0, refMatched = 0
+            // Rows from ESXi host exports repeat a shared datastore once per host and can reuse a local one's name.
+            let cSource = t.col(HostExportPlan.sourceColumn)
+            var byVolume: [String: Int] = [:]
             for r in t.rows {
                 let server = r.s(cServer), name = r.s(cName)
                 guard !name.isEmpty else { continue }
-                var d = Datastore(id: key(server, name))
+                let source = r.s(cSource)
+                let volumes = source.isEmpty ? [] : [r.s(cURL), r.s(cAddr)].filter { !$0.isEmpty }.map { $0.lowercased() }
+                let known = volumes.lazy.compactMap { byVolume[$0] }.first
+                let nameTaken = !source.isEmpty && known == nil && dsIndex[key(server, name)] != nil
+                var d = Datastore(id: nameTaken ? key(server, name + "@" + source) : key(server, name))
                 d.name = name
                 d.vcenter = server
                 d.type = r.s(cType)
@@ -552,9 +630,19 @@ private final class Builder {
                     refs += 1
                     if let hi = matchHost(server, hn) { refMatched += 1; d.hostKeys.append(inv.hosts[hi].id) }
                 }
+                if !d.accessible, !source.isEmpty { d.inaccessibleFrom = [d.hostNames.first ?? source] }
+                if let known {
+                    absorb(d, into: known)
+                    if dsIndex[d.id] == nil { dsIndex[d.id] = known }
+                    for v in volumes { byVolume[v] = known }
+                    for h in d.hostKeys { dsByHost[h + "|" + name.lowercased()] = known }
+                    continue
+                }
                 if dsIndex[d.id] != nil { continue }
                 inv.datastores.append(d)
                 dsIndex[d.id] = inv.datastores.count - 1
+                for v in volumes { byVolume[v] = inv.datastores.count - 1 }
+                if !source.isEmpty { for h in d.hostKeys { dsByHost[h + "|" + name.lowercased()] = inv.datastores.count - 1 } }
             }
             inv.joins.append(JoinStat(source: "vDatastore.Hosts", target: "Host (vHost)", keys: "VI SDK Server + host name", matched: refMatched, total: refs, note: "Host mounts per datastore"))
         }
@@ -595,7 +683,7 @@ private final class Builder {
                 perDS[d.datastore, default: 0] += d.capacityMiB
             }
             for name in vm.datastores {
-                guard let di = dsIndex[key(vm.vcenter, name)] else { continue }
+                guard let di = dsByHost[vm.hostKey + "|" + name.lowercased()] ?? dsIndex[key(vm.vcenter, name)] else { continue }
                 inv.datastores[di].vmIDs.append(vm.id)
                 inv.datastores[di].vmDiskMiB += perDS[name] ?? 0
                 if vm.isClusterAgent {
@@ -623,6 +711,24 @@ private final class Builder {
             }
             inv.datastores[i].clusterKeys = keys
             inv.datastores[i].clusters = names
+        }
+    }
+
+    /// Another host's view of a datastore. A host that can't reach it reports no capacity, so the fullest view is kept;
+    /// each host's VM count covers only the VMs registered on it.
+    func absorb(_ d: Datastore, into i: Int) {
+        let keys = Set(inv.datastores[i].hostNames.map { $0.lowercased() })
+        inv.datastores[i].hostNames += d.hostNames.filter { !keys.contains($0.lowercased()) }
+        inv.datastores[i].hostKeys += d.hostKeys.filter { !inv.datastores[i].hostKeys.contains($0) }
+        if let n = d.vmTotalReported { inv.datastores[i].vmTotalReported = (inv.datastores[i].vmTotalReported ?? 0) + n }
+        inv.datastores[i].accessible = inv.datastores[i].accessible || d.accessible
+        inv.datastores[i].inaccessibleFrom += d.inaccessibleFrom
+        if d.capacityMiB > inv.datastores[i].capacityMiB {
+            inv.datastores[i].capacityMiB = d.capacityMiB
+            inv.datastores[i].provisionedMiB = d.provisionedMiB
+            inv.datastores[i].inUseMiB = d.inUseMiB
+            inv.datastores[i].freeMiB = d.freeMiB
+            inv.datastores[i].freePct = d.freePct
         }
     }
 
@@ -741,8 +847,18 @@ private final class Builder {
             let cSwitch = t.col("Switch"), cName = t.col("Name"), cDC = t.col("Datacenter"), cVendor = t.col("Vendor"), cVer = t.col("Version")
             let cMembers = t.col("Host members"), cPorts = t.col("# Ports"), cVMs = t.col("# VMs"), cMTU = t.col("Max MTU")
             let cLACP = t.col("LACP Mode"), cServer = t.col("VI SDK Server")
+            let cSource = t.col(HostExportPlan.sourceColumn)
             for (ri, r) in t.rows.enumerated() {
                 let server = r.s(cServer)
+                // ESXi host exports each list the switch, with their own share of its ports and VMs.
+                if !r.s(cSource).isEmpty, let i = inv.dvSwitches.firstIndex(where: {
+                    $0.vcenter.caseInsensitiveCompare(server) == .orderedSame && $0.name == (r.s(cSwitch).isEmpty ? r.s(cName) : r.s(cSwitch))
+                }) {
+                    inv.dvSwitches[i].ports += r.i0(cPorts)
+                    inv.dvSwitches[i].vmCount += r.i0(cVMs)
+                    inv.dvSwitches[i].hostMembers += Parse.list(r.s(cMembers)).count
+                    continue
+                }
                 var s = DVSwitchInfo(id: "dvs\(ri)")
                 s.name = r.s(cSwitch).isEmpty ? r.s(cName) : r.s(cSwitch)
                 s.vcenter = server
@@ -851,8 +967,16 @@ private final class Builder {
     func buildLicensesAndPools() {
         if let t = ds.table("vLicense") {
             let cName = t.col("Name"), cKey = t.col("Key"), cTotal = t.col("Total"), cUsed = t.col("Used"), cExp = t.col("Expiration Date")
-            let cUnit = t.col("Cost Unit"), cServer = t.col("VI SDK Server")
+            let cUnit = t.col("Cost Unit"), cServer = t.col("VI SDK Server"), cSource = t.col(HostExportPlan.sourceColumn)
             for (ri, r) in t.rows.enumerated() {
+                // ESXi host exports each list a shared key, with only their own use of it.
+                if !r.s(cSource).isEmpty, let i = inv.licenses.firstIndex(where: {
+                    $0.vcenter.caseInsensitiveCompare(r.s(cServer)) == .orderedSame && $0.name == r.s(cName) && $0.keyMasked == (r.s(cKey).count > 5 ? "•••••-" + r.s(cKey).suffix(5) : r.s(cKey))
+                }) {
+                    inv.licenses[i].used += r.d0(cUsed)
+                    inv.licenses[i].total = max(inv.licenses[i].total, r.d0(cTotal))
+                    continue
+                }
                 var l = License(id: "lic\(ri)")
                 l.vcenter = r.s(cServer)
                 l.name = r.s(cName)
@@ -890,8 +1014,20 @@ private final class Builder {
         guard let t = ds.table("vHealth") else { return }
         let cName = t.col("Name"), cMsg = t.col("Message"), cType = t.col("Message type"), cServer = t.col("VI SDK Server")
         var matched = 0
+        // A host read directly reports the same message as its neighbours, and sees files of VMs registered on other
+        // hosts as zombies. Those VMs are known here, so only files outside every VM's folder are still in doubt.
+        let cSource = t.col(HostExportPlan.sourceColumn)
+        func folder(_ path: String) -> String? {
+            path.lastIndex(of: "/").map { path[..<$0].lowercased() }
+        }
+        let vmFolders = cSource == nil ? [] : Set(inv.vms.flatMap { vm in ([vm.vmxPath] + vm.disks.map(\.path)).compactMap(folder) })
+        var seen = Set<String>()
         for (ri, r) in t.rows.enumerated() {
             let server = r.s(cServer), name = r.s(cName)
+            if !r.s(cSource).isEmpty {
+                guard seen.insert(key(server, name) + "|" + r.s(cMsg) + "|" + r.s(cType)).inserted else { continue }
+                if r.s(cType).lowercased() == "zombie", let f = folder(name), vmFolders.contains(f) { continue }
+            }
             var h = HealthItem(id: ri)
             h.vcenter = server
             h.name = name

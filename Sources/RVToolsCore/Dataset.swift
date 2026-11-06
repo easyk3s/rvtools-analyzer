@@ -117,6 +117,8 @@ public final class Dataset: @unchecked Sendable {
         ((rvtoolsVersion.isEmpty ? [] : ["RVTools \(rvtoolsVersion)"]) + sourceTools.map(\.label)).joined(separator: " + ")
     }
     public private(set) var warnings: [String] = []
+    /// Problems found with each export before merging (see `SourceChecks`). All of them are also listed in `warnings`.
+    public private(set) var sourceIssues: [SourceIssue] = []
     /// The columns used for exports with non-standard headers.
     public private(set) var columnPlans: [ColumnPlan] = []
     /// What to keep with a saved project, so reopening it doesn't ask again.
@@ -131,7 +133,9 @@ public final class Dataset: @unchecked Sendable {
     /// `reviewColumns` lets someone check the columns of an export with non-standard headers: it returns the plan to
     /// use, or nil to stop loading (`CancellationError`). Without it, only confident matches are used. `columnChoices`
     /// restores earlier decisions, which aren't asked about again.
-    public static func load(_ urls: [URL], columnChoices saved: ColumnChoices? = nil, reviewColumns: ((ColumnPlan) -> ColumnPlan?)? = nil) throws -> Dataset {
+    /// `vcenterMerges` regroups ESXi host exports under a different inferred vCenter, by name (see `HostExportPlan`).
+    public static func load(_ urls: [URL], columnChoices saved: ColumnChoices? = nil, vcenterMerges: [String: String]? = nil,
+                            reviewColumns: ((ColumnPlan) -> ColumnPlan?)? = nil) throws -> Dataset {
         let ds = Dataset()
         var fileDates: [Date] = []
         var collectorDates: [Date] = []
@@ -170,23 +174,37 @@ public final class Dataset: @unchecked Sendable {
         // A Collector mapping file can come in any order relative to the anonymized export it restores.
         var mapping: [String: String] = [:]
         for w in workbooks where NutanixCollector.isMapping(w.raws) { mapping.merge(NutanixCollector.mapping(w.raws)) { a, _ in a } }
+        // Checked per export, not per file: "export all to csv" writes one file per tab into a folder.
+        var exports: [(name: String, tables: [RawTable])] = []
+        // Added once every export has been read: ESXi host exports are regrouped by what they have in common.
+        var pending: [(raw: RawTable, file: String, export: String?)] = []
         for (file, raws) in workbooks {
             ds.sources.append(file)
             if NutanixCollector.isMapping(raws) { continue }
             if NutanixCollector.isCollector(raws) {
                 let r = NutanixCollector.translate(raws, mapping: mapping, file: file.lastPathComponent)
-                for raw in r.tables { ds.add(raw, from: file.lastPathComponent) }
+                for raw in r.tables { pending.append((raw, file.lastPathComponent, nil)) }
                 ds.warnings += r.warnings
                 ds.addSourceTool(NutanixCollector.sourceTool(version: r.version))
                 if let d = r.collected { collectorDates.append(d); continue }
             } else if LiveOptics.isLiveOptics(raws) {
                 let r = LiveOptics.translate(raws, file: file.lastPathComponent)
-                for raw in r.tables { ds.add(raw, from: file.lastPathComponent) }
+                for raw in r.tables { pending.append((raw, file.lastPathComponent, nil)) }
                 ds.warnings += r.warnings
                 ds.addSourceTool(LiveOptics.sourceTool(version: r.version))
                 if let d = r.collected { collectorDates.append(d); continue }
             } else {
                 var tables = raws.filter { !$0.headers.isEmpty }
+                for i in tables.indices {
+                    guard let restored = SourceChecks.restoringHeader(tables[i]) else { continue }
+                    ds.warnings.append("\(file.lastPathComponent): \(tables[i].name)'s header was at row \(Fmt.int(restored.row)), not the first row, probably from sorting the tab with its header. It was read as the header and the other rows as data")
+                    tables[i] = restored.table
+                }
+                for i in tables.indices {
+                    guard let cleaned = SourceChecks.removingRepeatedHeaders(tables[i]) else { continue }
+                    ds.warnings.append("\(file.lastPathComponent): \(tables[i].name) repeats its header on \(Fmt.int(cleaned.removed)) other row(s), which weren't read as data")
+                    tables[i] = cleaned.table
+                }
                 if let proposed = ColumnMatcher.plan(for: tables, file: file.lastPathComponent) {
                     let plan: ColumnPlan
                     if let saved {
@@ -201,7 +219,10 @@ public final class Dataset: @unchecked Sendable {
                     ds.columnPlans.append(plan)
                     ds.warnings.append("\(file.lastPathComponent) doesn't use RVTools' usual column names: \(Fmt.int(plan.matchedCount)) of \(Fmt.int(plan.columnCount)) columns were matched to them")
                 }
-                for raw in tables { ds.add(raw, from: file.lastPathComponent) }
+                let isCSV = !["xlsx", "xlsm"].contains(file.pathExtension.lowercased())
+                let export = isCSV ? file.deletingLastPathComponent().lastPathComponent : file.lastPathComponent
+                for raw in tables { pending.append((raw, file.lastPathComponent, export)) }
+                if let i = exports.firstIndex(where: { $0.name == export }) { exports[i].tables += tables } else { exports.append((export, tables)) }
             }
             if let d = Parse.dateFromExportName(file.lastPathComponent) ?? Parse.dateFromExportName(file.deletingLastPathComponent().lastPathComponent) {
                 fileDates.append(d)
@@ -209,15 +230,17 @@ public final class Dataset: @unchecked Sendable {
                 fileDates.append(m)
             }
         }
+        let hostExports = HostExportPlan(exports: exports, merges: vcenterMerges ?? [:])
+        ds.warnings += hostExports.notes
+        for p in pending { ds.add(p.export.map { hostExports.apply(p.raw, export: $0) } ?? p.raw, from: p.file) }
         guard ds.table("vInfo") != nil else {
             if !mapping.isEmpty {
                 throw RVToolsError.notRVTools("This is a Nutanix Collector mapping file — open it together with the anonymized ntnxcollector export it belongs to")
             }
             throw RVToolsError.notRVTools("No vInfo tab found — this doesn't look like an RVTools, Nutanix Collector or Live Optics export (tabs found: \(ds.tableNames.joined(separator: ", ")))")
         }
-        if let info = ds.table("vInfo"), !info.rows.isEmpty, info.col("VM") == nil {
-            ds.warnings.append("vInfo has no VM column, so its \(Fmt.int(info.rows.count)) row(s) couldn't be read as VMs")
-        }
+        for export in exports { ds.sourceIssues += SourceChecks.evaluate(source: export.name, tables: export.tables) }
+        ds.warnings += ds.sourceIssues.map(\.text)
         ds.tableNames.sort { a, b in
             let ia = knownSheets.firstIndex { $0.caseInsensitiveCompare(a) == .orderedSame } ?? Int.max
             let ib = knownSheets.firstIndex { $0.caseInsensitiveCompare(b) == .orderedSame } ?? Int.max

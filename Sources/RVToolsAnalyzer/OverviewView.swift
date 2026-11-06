@@ -15,7 +15,7 @@ struct OverviewView: View {
                 SourceWarningsNotice()
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 12)], spacing: 12) {
                     KPITile(title: "Virtual machines", value: Fmt.int(t.vms), detail: "\(Fmt.int(t.vmsOn)) on · \(Fmt.int(t.vmsOff)) off · \(Fmt.int(t.templates)) templates", symbol: "desktopcomputer")
-                    KPITile(title: "Hosts", value: Fmt.int(t.hosts), detail: "\(t.clusters) clusters · \(t.datacenters) datacenters · \(t.vcenters) vCenter\(t.vcenters == 1 ? "" : "s")", symbol: "server.rack")
+                    KPITile(title: "Hosts", value: Fmt.int(t.hosts), detail: "\(t.clusters) clusters · \(t.datacenters) datacenters · \(report.inventory.vcenterSummary)", symbol: "server.rack")
                     // Without host data these read as zero; say so rather than show 0 cores or 0%.
                     let hosts = q.hostCapacityKnown, noHosts = q.absent("vHost")
                     KPITile(title: "Physical compute", value: hosts ? "\(Fmt.int(t.cores)) cores" : "—", detail: hosts ? "\(t.sockets) sockets · \(Fmt.memory(mib: t.physMemMiB)) RAM" : noHosts, symbol: "cpu")

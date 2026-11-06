@@ -38,6 +38,8 @@ public struct ProjectFile: Codable, Sendable {
     public var snapshotGroups: [[String]]?
     /// Columns chosen for exports with non-standard headers, so reopening doesn't ask again.
     public var columnMapping: ColumnChoices?
+    /// Inferred vCenters merged by hand, from name to name, for exports taken from ESXi hosts directly.
+    public var vcenterMerges: [String: String]?
 
     public init(name: String) {
         self.name = name

@@ -78,7 +78,7 @@ public enum DeckBatch {
             if var scripted = found as? ScriptedSolution { scripted.findings = r.groups; s = scripted }
             var selections: [String: [VM]] = [:]
             for sel in s.selections {
-                let ids = s.defaultSelection(inv, for: sel)
+                let ids = s.initialSelection(inv, for: sel)
                 selections[sel.id] = inv.vms.filter { ids.contains($0.id) }
             }
             var notes: [String] = []
@@ -125,6 +125,8 @@ public extension ParamValues {
             case .multi: v.values[name] = .selection(value.split(separator: ",").compactMap { Int($0) })
             case .host: v.values[name] = .names(value.isEmpty ? [] : [value.trimmingCharacters(in: .whitespaces)])
             case .clusters: v.values[name] = .names(value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+            // "A=B,C=D", by cluster name or id.
+            case .clusterPairs: v.values[name] = .names(value.split(separator: ",").flatMap { $0.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) } })
             }
         }
         return v

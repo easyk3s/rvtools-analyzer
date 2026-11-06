@@ -115,7 +115,7 @@ public enum SolutionAPI {
         return [
             "apiVersion": version,
             "reportDate": date(inv.reportDate),
-            "vcenters": inv.vcenters.map { ["id": $0.id, "server": $0.server, "fullName": $0.fullName, "version": $0.version, "build": $0.build] as [String: Any] },
+            "vcenters": inv.vcenters.map { ["id": $0.id, "server": $0.server, "kind": $0.kind.rawValue, "fullName": $0.fullName, "version": $0.version, "build": $0.build] as [String: Any] },
             "clusters": inv.clusters.map(cluster),
             "hosts": inv.hosts.map(host),
             "vms": inv.vms.map { vm($0, clusterName: clusterNames[$0.clusterKey]) },
@@ -145,6 +145,7 @@ public enum SolutionAPI {
             "isRunning": v.isRunning,
             "isTemplate": v.isTemplate,
             "isSRMPlaceholder": v.isSRMPlaceholder,
+            "notInVInfo": v.notInVInfo,
             "isClusterAgent": v.isClusterAgent,
             "consolidationNeeded": v.consolidationNeeded,
             "os": [
