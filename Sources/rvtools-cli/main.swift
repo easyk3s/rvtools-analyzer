@@ -236,8 +236,11 @@ if let i = args.firstIndex(of: "--prices"), i + 1 < args.count {
             print("  \(region.code.padding(toLength: 20, withPad: " ", startingAt: 0)) FAILED: \(e)")
         } else if let rp = PriceStore.shared.prices(provider, region.code) {
             let priced = rp.instances.filter { $0.linuxHourly != nil }
+            let avs = rp.avsNodes ?? []
             print("  \(region.code.padding(toLength: 20, withPad: " ", startingAt: 0)) \(priced.count) instances · \(rp.instances.filter { $0.windowsHourly != nil }.count) Windows · "
-                + "\(rp.instances.filter { $0.reserved1yHourly != nil }.count) reserved · storage \(rp.storage.keys.sorted().joined(separator: " "))")
+                + "\(rp.instances.filter { $0.reserved1yHourly != nil }.count) reserved · storage \(rp.storage.keys.sorted().joined(separator: " "))"
+                + (provider == .azure ? " · AVS \(avs.isEmpty ? "none" : avs.map(\.sku).joined(separator: " "))" : "")
+                + (provider == .azure ? " · datastores \((rp.avsDatastores ?? []).map(\.shortLabel).joined(separator: " "))" : ""))
         }
     }
     exit(0)
