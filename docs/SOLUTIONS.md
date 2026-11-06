@@ -1,6 +1,6 @@
 # Writing custom solutions
 
-RVTools Analyzer ships with seven built-in solutions: Backup Sizing, DR Sizing, VCF 9 Readiness, VCF 9 Sizing, Azure Migration, AWS Migration and Alternate Hypervisors. You can add your own without changing or rebuilding the app. A custom solution is a folder containing a `manifest.json` and a JavaScript file. Anyone with the app can install it, and it shows up in the sidebar under **Custom Solutions**.
+RVTools Analyzer ships with eight built-in solutions: Backup Sizing, DR Sizing, VCF 9 Readiness, VCF 9 Sizing, Azure Migration, AWS Migration, Azure VMware Solution Sizing and Alternate Hypervisors. You can add your own without changing or rebuilding the app. A custom solution is a folder containing a `manifest.json` and a JavaScript file. Anyone with the app can install it, and it shows up in the sidebar under **Custom Solutions**.
 
 A custom solution gets the same treatment as a built-in one:
 - the same three steps: **Select VMs**, **Assumptions** and **Results**
@@ -453,6 +453,12 @@ A price sheet:
 Missing prices are left out (`undefined`), not zero. The built-in downloads cover these instance families:
 - **Azure:** Dsv5, Dasv5, Esv5, Easv5, Dsv6, Dasv6, Esv6, Easv6, Fsv2
 - **AWS:** m5/m6i/m6a/m7i/m7a, r5/r6i/r6a/r7i/r7a, c5/c6i/c6a/c7i/c7a, t3
+
+Downloading Azure prices also fetches, for the built-in Azure VMware Solution Sizing:
+- **AVS node rates** — the "VCF BYOL" host SKUs (AV36, AV36P, AV48, AV52, AV64), pay-as-you-go and reserved.
+- **AVS datastore rates** — Azure NetApp Files (Standard, Premium, Ultra) per GiB-month, and Azure Elastic SAN (Premium LRS, ZRS) base-unit and additional-capacity-unit rates.
+
+Neither is in `sheet.instances`, because an AVS node is bought whole and must never turn up as a candidate instance for a single VM in `rva.cloud.bestFit`. A custom solution that needs node or datastore rates can carry them in its own price list, as `instances` entries without `vcpu` / `memoryGiB` or as `extra` keys.
 
 Anything else (AVS or VMware Cloud nodes, NetApp Files, egress, …) has to come from a price list.
 
