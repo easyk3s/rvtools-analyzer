@@ -143,6 +143,8 @@ public struct AzureVMwareSizing: PricedSolution {
         let sku: String
         let spec: AVSNodes.Spec
         let nodes: Int
+        /// Clusters the nodes are split into: a cluster holds at most 16 hosts and keeps its own failure reserve.
+        let clusters: Int
         /// Nodes each resource alone would need (storage is 0 when external storage carries the overflow).
         let cpuNodes: Int
         let memNodes: Int
@@ -169,15 +171,29 @@ public struct AzureVMwareSizing: PricedSolution {
         var vcfMonthly: Double { licensedCores * vcfPerCoreYear / 12 }
         var externalMonthly: Double { externalBilledGiB * (external.offer?.perGiBMonth ?? 0) }
         var total: Double { nodeMonthly + vcfMonthly + externalMonthly }
-        var clusters: Int { max(1, Int((Double(nodes) / Double(AVSNodes.maxHostsPerCluster)).rounded(.up))) }
         /// Raw vSAN capacity the nodes bring, less the SLA slack.
         var usableTB: Double { Double(nodes) * spec.capacityTB * AVSNodes.vsanUsablePct / 100 }
         /// VM data that fits on the nodes' vSAN once the storage policy is applied.
         var vsanDataGiB: Double { AzureVMwareSizing.tbToGiB(usableTB) / max(policyFactor, 0.01) }
 
-        /// Cores and memory available for VMs once the spare nodes are out and the load limit applied.
-        var cpuCapacity: Double { Double(max(nodes - spare, 0)) * Double(spec.cores) * maxLoad }
-        var memCapacity: Double { Double(max(nodes - spare, 0)) * spec.memoryGiB * maxLoad }
+        /// Nodes held in reserve across the private cloud: every cluster keeps its own.
+        var reservedNodes: Int { clusters * spare }
+        /// Cores and memory available for VMs once each cluster's spare nodes are out and the load limit applied.
+        var cpuCapacity: Double { Double(max(nodes - reservedNodes, 0)) * Double(spec.cores) * maxLoad }
+        var memCapacity: Double { Double(max(nodes - reservedNodes, 0)) * spec.memoryGiB * maxLoad }
+
+        /// Nodes per cluster, spread as evenly as the count allows — the split that makes workload placement
+        /// and vSAN capacity easiest, since neither pools across clusters.
+        var split: [Int] {
+            guard clusters > 1 else { return [nodes] }
+            let base = nodes / clusters
+            let extra = nodes % clusters
+            return (0..<clusters).map { base + ($0 < extra ? 1 : 0) }
+        }
+        var splitLabel: String {
+            guard clusters > 1 else { return "one cluster" }
+            return "\(clusters) clusters (\(split.map(String.init).joined(separator: " + ")))"
+        }
 
         /// What set the node count, for the sizing-drivers table.
         var driver: String {
@@ -185,7 +201,7 @@ public struct AzureVMwareSizing: PricedSolution {
             if cpuNodes == nodes { tied.append("CPU") }
             if memNodes == nodes { tied.append("memory") }
             if storageNodes == nodes && storageNodes > 0 { tied.append("storage") }
-            if tied.isEmpty { return "minimum cluster size" }
+            if tied.isEmpty { return clusters > 1 ? "the cluster host limit" : "minimum cluster size" }
             return tied.joined(separator: " and ")
         }
     }
@@ -260,8 +276,9 @@ public struct AzureVMwareSizing: PricedSolution {
         }
         let perNodeCores = Double(spec.cores) * maxLoad
         let perNodeMem = spec.memoryGiB * maxLoad
-        let cpuNodes = Int((cores / perNodeCores).rounded(.up)) + spare
-        let memNodes = Int((memGiB / perNodeMem).rounded(.up)) + spare
+        // Nodes that have to carry load, before any failure reserve.
+        let cpuUsable = Int((cores / perNodeCores).rounded(.up))
+        let memUsable = Int((memGiB / perNodeMem).rounded(.up))
         let floor = max(AVSNodes.minHostsPerCluster, policy.minHosts)
 
         // All the VM data that has to live somewhere, after data reduction and growth.
@@ -272,15 +289,32 @@ public struct AzureVMwareSizing: PricedSolution {
 
         // vSAN-only sizing adds nodes until the data fits; the other modes leave the overflow to external storage,
         // which protects its own data, so no policy multiplier applies to it.
-        var storageNodes = 0
-        var nodes = max(max(cpuNodes, memNodes), floor)
+        // A cluster holds at most 16 hosts, so the node count and the cluster count are decided together: every
+        // extra cluster keeps its own failure reserve (HA admission control is per cluster) and must itself meet
+        // the minimum host count. Try each cluster count and keep the one needing the fewest nodes.
+        let storageNodes = external.active || perNodeDataGiB <= 0
+            ? 0 : Int((dataGiB / perNodeDataGiB).rounded(.up))
+        var nodes = 0
+        var clusterCount = 1
+        for k in 1...AVSNodes.maxClustersPerPrivateCloud {
+            // Load has to fit with `spare` nodes out of *each* cluster.
+            let forLoad = max(cpuUsable, memUsable) + k * spare
+            let candidate = max(max(forLoad, storageNodes), k * floor)
+            guard candidate <= k * AVSNodes.maxHostsPerCluster else { continue }
+            nodes = candidate
+            clusterCount = k
+            break
+        }
+        // Past the private cloud limit nothing fits; report the uncapped figure so the check can say so.
+        if nodes == 0 {
+            clusterCount = AVSNodes.maxClustersPerPrivateCloud
+            nodes = max(max(cpuUsable, memUsable) + clusterCount * spare, max(storageNodes, clusterCount * floor))
+        }
+
         var externalDataGiB = 0.0
         if external.active {
             let onVSAN = external.mode == 2 ? 0 : Double(nodes) * perNodeDataGiB
             externalDataGiB = max(0, dataGiB - onVSAN)
-        } else {
-            storageNodes = perNodeDataGiB > 0 ? Int((dataGiB / perNodeDataGiB).rounded(.up)) : 0
-            nodes = max(nodes, storageNodes)
         }
 
         // What the external datastore is billed for: the data plus free-space headroom, and at least any minimum size.
@@ -297,8 +331,9 @@ public struct AzureVMwareSizing: PricedSolution {
         }
         // vSAN capacity actually consumed: everything not sent to external storage, at the policy multiplier.
         let onVSANData = max(0, dataGiB - externalDataGiB)
-        return Plan(region: region, sku: sku, spec: spec, nodes: nodes, cpuNodes: cpuNodes, memNodes: memNodes,
-                    storageNodes: storageNodes, floorNodes: floor, hourly: hourly, hours: p.num("hours"),
+        return Plan(region: region, sku: sku, spec: spec, nodes: nodes, clusters: clusterCount,
+                    cpuNodes: cpuUsable + clusterCount * spare, memNodes: memUsable + clusterCount * spare,
+                    storageNodes: storageNodes, floorNodes: clusterCount * floor, hourly: hourly, hours: p.num("hours"),
                     licensedCores: licensed, vcfPerCoreYear: p.num("vcfCost"), dataGiB: dataGiB,
                     storageTB: Self.gibToTB(onVSANData * policy.factor), externalDataGiB: externalDataGiB,
                     externalBilledGiB: billed, external: external, spare: spare, maxLoad: maxLoad, policyFactor: policy.factor)
@@ -373,7 +408,7 @@ public struct AzureVMwareSizing: PricedSolution {
 
         var metrics: [SolutionMetric] = [
             SolutionMetric("Nodes", "\(best.nodes) × \(best.sku)",
-                           best.clusters > 1 ? "\(best.clusters) clusters" : "one cluster", symbol: "server.rack",
+                           best.splitLabel, symbol: "server.rack",
                            status: best.nodes > AVSNodes.maxHostsPerPrivateCloud ? .blocker : nil),
             SolutionMetric("Constrained by", best.driver.prefix(1).uppercased() + best.driver.dropFirst(), constraintDetail,
                            symbol: "arrow.up.and.down.and.arrow.left.and.right"),
@@ -483,7 +518,12 @@ public struct AzureVMwareSizing: PricedSolution {
         let needCores = coresNeeded(total, p, best.spec)
         let needMem = memNeeded(total, p)
         let onVSAN = max(0, best.dataGiB - best.externalDataGiB)
-        let spareNote = spare > 0 ? " with \(spare) node(s) out" : ""
+        var spareNote = ""
+        if spare > 0 {
+            spareNote = best.clusters > 1
+                ? " with \(spare) out of each of \(best.clusters) clusters (\(best.reservedNodes) nodes)"
+                : " with \(spare) node(s) out"
+        }
         var driverRows: [[String]] = [
             ["CPU — physical cores at \(SFmt.num(p.num("ratio"))):1", "\(SFmt.num(needCores)) cores",
              "\(SFmt.num(best.cpuCapacity)) cores\(spareNote) at \(SFmt.num(maxLoad * 100))%", Fmt.pct(cpuUsed),
@@ -500,7 +540,9 @@ public struct AzureVMwareSizing: PricedSolution {
             driverRows.append(["vSAN — data at \(policy.short) (×\(SFmt.num(policy.factor)))", Self.tib(onVSAN),
                                Self.tib(best.vsanDataGiB) + " on \(best.nodes) nodes", Fmt.pct(vsanUsed), "\(best.storageNodes)"])
         }
-        driverRows.append(["Minimum cluster size", "\(best.floorNodes) nodes", "—", "—", "\(best.floorNodes)"])
+        let floorPer = best.clusters > 0 ? best.floorNodes / best.clusters : best.floorNodes
+        driverRows.append(["Minimum cluster size — \(floorPer) per cluster × \(best.clusters)",
+                           "\(best.floorNodes) nodes", "—", "—", "\(best.floorNodes)"])
         driverRows.append(["Sized private cloud — constrained by \(best.driver)", "", "", "", "\(best.nodes)"])
         sections.append(.table(SolutionTable(
             id: "drivers", title: "What constrains the sizing",
@@ -703,14 +745,28 @@ public struct AzureVMwareSizing: PricedSolution {
                     + "\(AVSNodes.maxClustersPerPrivateCloud) clusters per private cloud")
         }
         if best.clusters > 1 {
-            b.add("clusters", "Limits", "More than one cluster", .info,
-                  "\(best.nodes) nodes exceed the \(AVSNodes.maxHostsPerCluster)-host cluster limit, so the private cloud needs \(best.clusters) clusters",
-                  remediation: "vSAN capacity doesn't pool across clusters: each cluster needs its own storage headroom, so size per cluster before committing.")
+            // The second cluster is not free: it brings its own failure reserve and its own minimum host count.
+            let singleCluster = max(best.cpuNodes - (best.clusters - 1) * best.spare, best.storageNodes)
+            let extra = best.nodes - singleCluster
+            var summary = "\(singleCluster) nodes' worth of capacity exceeds the \(AVSNodes.maxHostsPerCluster)-host cluster limit, "
+            summary += "so the private cloud is \(best.splitLabel)"
+            if extra > 0 && best.spare > 0 {
+                summary += extra == 1 ? " — 1 extra node for the second reserve" : " — \(extra) extra nodes for the extra reserves"
+                summary += best.spare == 1 ? ", since each cluster tolerates its own failure" : ", since each cluster tolerates its own \(best.spare) failures"
+            }
+            b.add("clusters", "Limits", "More than one cluster", .warning, summary,
+                  remediation: "Neither vSAN capacity nor HA failover pools across clusters, so each cluster needs its own reserve and its own "
+                    + "storage headroom. An even split keeps that simplest, and workloads then have to be balanced to match it — a cluster can't "
+                    + "lend capacity to another. Check too that no single VM's disks exceed one cluster's datastore.")
         }
-        if best.nodes == AVSNodes.minHostsPerCluster {
-            b.add("minhosts", "Limits", "Minimum cluster size", .info,
-                  "Sized at the \(AVSNodes.minHostsPerCluster)-host minimum",
-                  remediation: "Microsoft recommends at least \(AVSNodes.recommendedHostsPerCluster) hosts per vSAN cluster: with three, a single host failure leaves no capacity to rebuild onto.")
+        let smallest = best.split.min() ?? best.nodes
+        if smallest < AVSNodes.recommendedHostsPerCluster {
+            b.add("minhosts", "Limits", "Cluster below the recommended size", .warning,
+                  best.clusters > 1
+                    ? "The smallest cluster has \(smallest) hosts; Microsoft recommends at least \(AVSNodes.recommendedHostsPerCluster) per vSAN cluster"
+                    : "Sized at \(best.nodes) hosts; Microsoft recommends at least \(AVSNodes.recommendedHostsPerCluster) per vSAN cluster",
+                  remediation: "Three hosts is the hard minimum, but with three a single failure leaves no capacity to rebuild onto. "
+                    + "Add a host to the smallest cluster before committing.")
         }
         if best.sku == "AV64" {
             b.add("av64", "Limits", "AV64 needs a base private cloud", .warning,
@@ -844,7 +900,11 @@ public struct AzureVMwareSizing: PricedSolution {
             + "\(SFmt.num(best.spec.capacityTB)) TB raw vSAN capacity (\(best.spec.vsan)). At most \(AVSNodes.maxHostsPerCluster) hosts per cluster, "
             + "\(AVSNodes.maxHostsPerPrivateCloud) per private cloud.")
         out.append("Capacity: vCPU at \(SFmt.num(p.num("ratio"))):1 per physical core and memory 1:1, both fitting with \(Int(p.num("spare"))) node(s) out "
-            + "at no more than \(SFmt.num(p.num("maxLoad")))% load."
+            + "of every cluster at no more than \(SFmt.num(p.num("maxLoad")))% load. A cluster holds at most "
+            + "\(AVSNodes.maxHostsPerCluster) hosts and at least \(AVSNodes.minHostsPerCluster), so the node count and the cluster count are "
+            + "decided together: each cluster keeps its own failure reserve, because HA failover doesn't pool across clusters, which is why "
+            + "crossing \(AVSNodes.maxHostsPerCluster) nodes costs more than one node. Nodes are split evenly, the easiest split to place "
+            + "workloads and vSAN capacity against."
             + (p.flag("mgmtPool") ? " The AVS management resource pool (\(SFmt.num(AVSNodes.managementReservationGHz)) GHz, \(SFmt.num(AVSNodes.managementReservationGiB)) GiB) is reserved on top." : ""))
         // Built up in steps: as one expression this is too much for the type checker on older toolchains.
         let swapText: String = p.flag("swap") ? " plus swap files" : ""
