@@ -18,6 +18,9 @@ struct RVToolsAnalyzerApp: App {
             CommandGroup(replacing: .appInfo) {
                 Button("About \(BuildInfo.name)") { BuildInfo.showAboutPanel() }
             }
+            CommandGroup(replacing: .help) {
+                Button("RVTools Analyzer on GitHub") { model.openRepository() }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Open…") { model.presentOpenPanel() }.keyboardShortcut("o")
                 Button("Compare Snapshots…") { model.presentTrendPanel() }.keyboardShortcut("o", modifiers: [.command, .option])
