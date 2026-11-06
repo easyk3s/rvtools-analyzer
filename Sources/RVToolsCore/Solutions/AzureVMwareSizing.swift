@@ -19,12 +19,14 @@ public struct AzureVMwareSizing: PricedSolution {
     }
 
     /// vSAN storage policies: capacity multiplier and the hosts each needs. `label` is the dropdown, `short` reads in prose.
-    static let policies: [(label: String, short: String, factor: Double, minHosts: Int)] = [
-        ("RAID-1 (mirror), FTT=1 — AVS default", "RAID-1 (mirror), FTT=1", 2.0, 3),
-        ("RAID-5 (erasure coding), FTT=1", "RAID-5, FTT=1", 1.25, 4),
-        ("RAID-1 (mirror), FTT=2", "RAID-1 (mirror), FTT=2", 3.0, 5),
-        ("RAID-6 (erasure coding), FTT=2", "RAID-6, FTT=2", 1.5, 6),
+    static let policies: [(label: String, short: String, factor: Double, minHosts: Int, ftt: Int)] = [
+        ("RAID-1 (mirror), FTT=1 — AVS default", "RAID-1 (mirror), FTT=1", 2.0, 3, 1),
+        ("RAID-5 (erasure coding), FTT=1", "RAID-5, FTT=1", 1.25, 4, 1),
+        ("RAID-1 (mirror), FTT=2", "RAID-1 (mirror), FTT=2", 3.0, 5, 2),
+        ("RAID-6 (erasure coding), FTT=2", "RAID-6, FTT=2", 1.5, 6, 2),
     ]
+    /// Microsoft ties the expected FTT to cluster size: FTT=1 for 3-5 hosts, FTT=2 for 6-16.
+    static let fttThresholdHosts = 6
 
     var regionList: [CloudRegion] { CloudRegions.azure }
 
@@ -54,8 +56,11 @@ public struct AzureVMwareSizing: PricedSolution {
         .number("buffer", "Capacity", "Right-sizing buffer", 25, min: 0, max: 200, unit: "%"),
         .number("ratio", "Capacity", "vCPU per physical core", 4, min: 0.5, max: 20, step: 0.5, unit: ": 1",
                 help: "CPU overcommitment on the nodes. AVS nodes are hyperthreaded (2 logical cores per physical core), so 4:1 is a common starting point for mixed server workloads."),
-        .number("spare", "Capacity", "Host failures to tolerate", 1, min: 0, max: 3,
-                help: "Nodes held back for failures and maintenance: CPU and memory must fit with these nodes out."),
+        .number("spare", "Capacity", "Host failures to tolerate, per cluster", 1, min: 0, max: 3,
+                help: "Nodes held back for failures and maintenance, in every cluster: CPU and memory must fit with these nodes out. "
+                    + "AVS does this itself — Microsoft configures each cluster for n+1 through vSphere HA percentage-based admission control, "
+                    + "and a three-node cluster runs workloads on two with one node's resources held in reserve. Unlike VMware Cloud on AWS, "
+                    + "that reserve comes out of the hosts you pay for, so 1 matches the platform. Stretched clusters are n+2."),
         .number("maxLoad", "Capacity", "Max CPU / memory load with those nodes down", 80, min: 50, max: 100, unit: "%"),
         .toggle("mgmtPool", "Capacity", "Reserve the AVS management resource pool", true,
                 help: "AVS reserves \(SFmt.num(AVSNodes.managementReservationGHz)) GHz of CPU and \(SFmt.num(AVSNodes.managementReservationGiB)) GiB of memory on the first cluster for vCenter, NSX and HCX. It can't be changed."),
@@ -76,7 +81,9 @@ public struct AzureVMwareSizing: PricedSolution {
         .choice("diskBasis", "Storage", "Size disks from", ["Provisioned disk size", "Guest used space + headroom"]),
         .number("diskHead", "Storage", "Disk headroom (guest used basis)", 20, min: 0, max: 200, unit: "%"),
         .choice("policy", "Storage", "vSAN storage policy", Self.policies.map(\.label),
-                help: "Sets the capacity multiplier and the minimum nodes per cluster."),
+                help: "Sets the capacity multiplier and the minimum nodes per cluster. Microsoft ties the expected level to cluster size for the "
+                    + "SLA — FTT=1 for 3 to 5 hosts, FTT=2 for 6 to 16 — and says policies aren't upgraded automatically when a cluster grows. "
+                    + "For a cluster of 6 or more, RAID-6 FTT=2 both protects more and costs less capacity (×1.5) than the RAID-1 FTT=1 default (×2)."),
         .number("reduction", "Storage", "vSAN data reduction ratio", 1, min: 1, max: 5, step: 0.1, unit: ": 1",
                 help: "Deduplication and compression. 1:1 assumes none, which is the safe starting point — measure before relying on a higher ratio."),
         .toggle("swap", "Storage", "Include VM swap files", true,
@@ -682,7 +689,7 @@ public struct AzureVMwareSizing: PricedSolution {
 
     private func checks(best: Plan, inScope: [VM], perVM: [(vm: VM, d: Demand)], demandTotal: Demand, inv: Inventory, p: Params, term: AVSTerm,
                         missing: [String], byRegion: [(code: String, plans: [Plan])], fetched: Date,
-                        policy: (label: String, short: String, factor: Double, minHosts: Int)) -> CheckBuilder {
+                        policy: (label: String, short: String, factor: Double, minHosts: Int, ftt: Int)) -> CheckBuilder {
         var b = CheckBuilder()
         let name = { (code: String) in CloudRegions.name(.azure, code) }
 
@@ -759,6 +766,30 @@ public struct AzureVMwareSizing: PricedSolution {
                     + "storage headroom. An even split keeps that simplest, and workloads then have to be balanced to match it — a cluster can't "
                     + "lend capacity to another. Check too that no single VM's disks exceed one cluster's datastore.")
         }
+        // Microsoft ties the expected FTT to cluster size for the SLA, and says policies aren't upgraded
+        // automatically when a cluster grows. Above the threshold, RAID-6 FTT=2 protects more for less capacity
+        // than the RAID-1 FTT=1 default, so this is worth raising rather than leaving to the storage policy choice.
+        let largest = best.split.max() ?? best.nodes
+        if policy.ftt < 2 && largest >= Self.fttThresholdHosts {
+            let raid6 = Self.policies[3]
+            var actions: [SolutionAction] = []
+            if policy.factor > raid6.factor {
+                actions.append(SolutionAction("Switch to \(raid6.short)",
+                                              help: "Uses RAID-6 erasure coding at FTT=2: more protection and ×\(SFmt.num(raid6.factor)) capacity instead of ×\(SFmt.num(policy.factor)).",
+                                              set: ["policy": .choice(3)]))
+            }
+            var summary = "The plan's largest cluster has \(largest) hosts with \(policy.short); Microsoft expects FTT=2 "
+            summary += "at \(Self.fttThresholdHosts) hosts or more (FTT=1 for 3 to 5)"
+            b.add("fttsize", "Storage", "Storage policy below the level for this cluster size", .warning, summary,
+                  remediation: policy.factor > raid6.factor
+                    ? "\(raid6.short) tolerates two failures and needs ×\(SFmt.num(raid6.factor)) capacity against ×\(SFmt.num(policy.factor)) here, "
+                        + "so it protects more for less — at the cost of more write amplification. Microsoft notes policies aren't upgraded "
+                        + "automatically as a cluster grows, so this is worth setting deliberately."
+                    : "Raising FTT increases the capacity multiplier, so re-check the node count after changing it. Microsoft notes policies "
+                        + "aren't upgraded automatically as a cluster grows.",
+                  actions: actions)
+        }
+
         let smallest = best.split.min() ?? best.nodes
         if smallest < AVSNodes.recommendedHostsPerCluster {
             b.add("minhosts", "Limits", "Cluster below the recommended size", .warning,
@@ -883,7 +914,7 @@ public struct AzureVMwareSizing: PricedSolution {
     }
 
     private func notes(best: Plan, p: Params, term: AVSTerm, fetched: Date,
-                       policy: (label: String, short: String, factor: Double, minHosts: Int)) -> [String] {
+                       policy: (label: String, short: String, factor: Double, minHosts: Int, ftt: Int)) -> [String] {
         var out: [String] = []
         out.append("Scope: the selected VMs move into an Azure VMware Solution private cloud as they are — same ESXi, same vSphere, no re-platforming. "
             + "Nodes are sized for CPU, memory and vSAN capacity together, and the largest of the three sets the count.")
