@@ -1319,6 +1319,16 @@ final class AppModel {
     func showInFinder(_ url: URL) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
     func openFile(_ url: URL) { NSWorkspace.shared.open(url) }
     func openAuthoringGuide() { if let url = authoringGuideURL { NSWorkspace.shared.open(url) } }
+    func openRepository() {
+        guard let url = URL(string: "https://github.com/easyk3s/rvtools-analyzer") else {
+            errorMessage = "The RVTools Analyzer repository URL is invalid."
+            return
+        }
+        guard NSWorkspace.shared.open(url) else {
+            errorMessage = "Could not open the RVTools Analyzer repository."
+            return
+        }
+    }
 
     func openFolder(_ url: URL) {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
