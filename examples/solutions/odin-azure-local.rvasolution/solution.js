@@ -14,16 +14,18 @@ const ARB_MEMORY_GB = 8;
 const PLATFORM_VOLUMES_GB = 276;
 const HOST_MEMORY_BASE_GB = 32;
 const AUTO_MEMORY_CAP_GB = 2048;
-const SMALL_CLUSTER_MEMORY_CAP_GB = 1536;
+const HIGH_MEMORY_CAP_GB = 4096;
+const RECOMMENDED_MEMORY_GB = 1536;
 const CPU_HEADROOM = 0.80;
 const MEMORY_HEADROOM = 0.85;
 const STORAGE_HEADROOM = 0.80;
+const MAX_CAPACITY_DISKS = 24;
 const AUTO_NODE_OPTIONS = Array.from({ length: MAX_NODES - 1 }, (_, i) => i + 2);
 const MANUAL_NODE_OPTIONS = [2, 3, 4, 5, 6, 7, 8, 12, 16];
 const GROWTH_PCT = [0, 10, 20, 30, 50];
 const VCPU_RATIOS = [1, 2, 3, 4, 5, 6];
 const RESILIENCY = ["2way", "3way"];
-const DISK_TB = [0.96, 1.92, 3.84, 5.68, 7.68, 8, 12, 15.36, 16, 20];
+const DISK_TB = [0.96, 1.92, 3.84, 5.68, 7.68, 15.36];
 // Memory per machine options — copied from ODIN's sizer/sizer.js (MEMORY_OPTIONS_GB).
 const MEMORY_OPTIONS_GB = [64, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096];
 const FIXED_CORE_OPTIONS = [4, 8, 10, 12, 16, 18, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 72, 80, 84, 86, 96, 112, 128, 144, 160, 172, 192];
@@ -71,8 +73,9 @@ function run(vms, inventory, params, context) {
     ratio: VCPU_RATIOS[params.vcpuRatio] ?? 4,
     diskCount: params.diskCount,
     autoDisks: !!params.autoDisks,
-    maxDisks: Math.min(40, Math.max(params.maxDisks || params.diskCount, params.diskCount)),
-    diskTB: DISK_TB[params.diskSize] ?? 3.84,
+    maxDisks: Math.min(MAX_CAPACITY_DISKS, Math.max(params.maxDisks || params.diskCount, params.diskCount)),
+    // Older saved manifests offered extra disk-size choices; map those legacy indices to ODIN's largest size.
+    diskTB: DISK_TB[params.diskSize] ?? (params.diskSize >= DISK_TB.length ? DISK_TB[DISK_TB.length - 1] : 3.84),
   };
   baseHW.diskGB = baseHW.diskTB * 1024;
   const wantResiliency = params.resiliency === 0 ? 0 : 1; // index into RESILIENCY
@@ -148,7 +151,9 @@ function run(vms, inventory, params, context) {
 
   // ---- ODIN link ----------------------------------------------------------
   const clusterName = "RVTools-AzL";
-  const hwOut = hw;
+  const hwOut = Object.assign({}, hw, baseHW.autoDisks
+    ? { diskCount: baseHW.diskCount, diskTB: baseHW.diskTB, diskGB: baseHW.diskGB }
+    : {});
   let url = odinUrl(buildConfig(clusterName, chosen.n, !!fixed, params, hwOut, wantResiliency, demands, need, params.grouping === 1));
   if (params.grouping === 1 && url.length > MAX_URL) {
     checks.add("url", "ODIN link", "Link too long for per-VM workloads", "info",
@@ -223,7 +228,7 @@ function run(vms, inventory, params, context) {
   sections.push(rva.notes("Method and assumptions", [
     `Demand: ${rva.int(inScope.length)} VMs, ${rva.int(need.vcpu)} vCPU, ${rva.num(need.memoryGB, 0)} GB memory, ${rva.num(need.storageGB, 0)} GB provisioned storage`
       + (params.rightsize ? `, right-sized from observed usage plus ${params.buffer}%` : "") + (growthPct ? `, plus ${growthPct}% growth.` : "."),
-    `Auto starts at ODIN's default core count for ${gen.name}, scales upward through that generation's supported core options for fit and 80% CPU headroom, and uses two sockets per node. Auto begins at ODIN's recommended node count, snaps to its supported count, then adds nodes until utilization is below 90%. Fixed mode uses the selected sockets, cores per socket and memory without scaling; the ratio is ${hw.ratio}:1 in both modes.`,
+    `Auto starts at ODIN's default core count for ${gen.name}, scales upward through that generation's supported core options for fit and 80% CPU headroom, and uses two sockets per node. Auto prefers 1536 GB per node for clusters under 10 nodes, using higher memory when needed. It begins at ODIN's recommended node count, snaps to its supported count, then adds nodes until utilization is below 90%. Fixed mode uses the selected sockets, cores per socket and memory without scaling; the ratio is ${hw.ratio}:1 in both modes.`,
     `CPU capacity reserves max(2 cores, 10% of physical cores) per node. Memory capacity reserves max(${HOST_MEMORY_BASE_GB} GB, 8% of node RAM), then deducts ${ARB_MEMORY_GB} GB for Azure Resource Bridge; both CPU and memory use N−1 effective nodes.`,
     `Storage uses ODIN's all-flash capacity-disk sizes and 1024 GB per TB, with up to ${hw.maxDisks} disks per node. It reserves up to four repair disks and ${PLATFORM_VOLUMES_GB} GB for Azure Local platform volumes, then targets 80% raw-storage utilization. Storage demand is provisioned disk capacity, matching ODIN's RVTools import.`,
     "RVTools sizing is scoped to VM workloads. ODIN's GPU and non-VM workload sizing is not included.",
@@ -256,7 +261,7 @@ function recommendNodeCount(need, generation, hw, wantResiliency) {
   const maxCores = generation.cores[generation.cores.length - 1] * 2;
   const maxHostCores = Math.max(2, Math.ceil(maxCores * 0.1));
   const computeNodes = Math.ceil((need.vcpu + ARB_VCPU) / Math.max((maxCores - maxHostCores) * hw.ratio, 1));
-  const preferredMemory = SMALL_CLUSTER_MEMORY_CAP_GB;
+  const preferredMemory = RECOMMENDED_MEMORY_GB;
   const preferredHostMemory = Math.max(HOST_MEMORY_BASE_GB, Math.ceil(preferredMemory * 0.08));
   const memoryNodes = Math.ceil((need.memoryGB + ARB_MEMORY_GB) / Math.max(preferredMemory - preferredHostMemory, 1));
   const recommendationDiskGB = Math.max(hw.diskGB, 15.36 * 1024);
@@ -294,8 +299,8 @@ function sizeForNodeCount(n, need, generation, baseHW, wantResiliency, minimumCo
   if (fixedConfig) {
     memoryGB = fixedConfig.memoryGB;
   } else {
-    const memoryLimit = allowHighMemory ? MEMORY_OPTIONS_GB[MEMORY_OPTIONS_GB.length - 1]
-      : n < 10 ? SMALL_CLUSTER_MEMORY_CAP_GB : AUTO_MEMORY_CAP_GB;
+    const memoryLimit = allowHighMemory ? HIGH_MEMORY_CAP_GB
+      : n < 10 ? RECOMMENDED_MEMORY_GB : AUTO_MEMORY_CAP_GB;
     const memoryCapacity = (memory) => Math.max(0, (memory - Math.max(HOST_MEMORY_BASE_GB, Math.ceil(memory * 0.08))) * effectiveNodes - ARB_MEMORY_GB);
     let memoryIndex = MEMORY_OPTIONS_GB.findIndex((memory) => memory <= memoryLimit && memoryCapacity(memory) >= need.memoryGB);
     if (memoryIndex < 0) memoryIndex = MEMORY_OPTIONS_GB.findIndex((memory) => memory <= memoryLimit);
@@ -320,22 +325,24 @@ function nearestSupportedCoreCount(generation, requested) {
 }
 
 function diskPlan(n, need, hw, factor) {
-  const maxDisks = Math.min(40, Math.max(2, hw.maxDisks));
+  const maxDisks = Math.min(MAX_CAPACITY_DISKS, Math.max(2, hw.maxDisks));
   const minimumDisks = 2;
   let sizeIndex = Math.max(0, DISK_TB.findIndex((size) => size >= hw.diskTB));
   if (sizeIndex < 0) sizeIndex = DISK_TB.length - 1;
   let diskGB = DISK_TB[sizeIndex] * 1024;
+  const rawNeededForDiskSize = (sizeGB) => need.storageGB * factor + PLATFORM_VOLUMES_GB * factor + Math.min(n, 4) * sizeGB;
+  let rawNeededGB = rawNeededForDiskSize(diskGB);
+  let rawPerNodeNeededGB = rawNeededGB / n;
   let disks = Math.min(maxDisks, Math.max(minimumDisks, hw.autoDisks
-    ? Math.ceil(((need.storageGB * factor + PLATFORM_VOLUMES_GB * factor + Math.min(n, 4) * diskGB) / n) / diskGB)
+    ? Math.ceil(rawPerNodeNeededGB / diskGB)
     : hw.diskCount));
   if (hw.autoDisks) {
     const threshold = Math.ceil(maxDisks * 0.5);
     if (disks >= threshold) {
       let consolidated = null;
-      const rawPerNode = (need.storageGB * factor + PLATFORM_VOLUMES_GB * factor + Math.min(n, 4) * diskGB) / n;
       for (let i = sizeIndex + 1; i < DISK_TB.length; i++) {
         const candidateGB = DISK_TB[i] * 1024;
-        const candidateDisks = Math.ceil(rawPerNode / candidateGB);
+        const candidateDisks = Math.ceil(rawPerNodeNeededGB / candidateGB);
         if (candidateDisks < disks && candidateDisks <= maxDisks) {
           if (candidateDisks < threshold) {
             consolidated = { index: i, disks: candidateDisks };
@@ -347,24 +354,31 @@ function diskPlan(n, need, hw, factor) {
       if (consolidated) {
         sizeIndex = consolidated.index;
         diskGB = DISK_TB[sizeIndex] * 1024;
+        rawNeededGB = rawNeededForDiskSize(diskGB);
+        rawPerNodeNeededGB = rawNeededGB / n;
         disks = consolidated.disks;
       }
     }
-    for (let attempt = 0; attempt < 50; attempt++) {
-      const repairGB = Math.min(n, 4) * diskGB;
-      const rawNeed = need.storageGB * factor + PLATFORM_VOLUMES_GB * factor + repairGB;
-      const rawCapacity = n * disks * diskGB;
-      if (rawCapacity > 0 && rawNeed / rawCapacity <= STORAGE_HEADROOM) break;
+    if (disks >= maxDisks && disks * diskGB < rawPerNodeNeededGB) {
+      const nextSizeIndex = DISK_TB.findIndex((size, index) => index > sizeIndex && disks * size * 1024 >= rawPerNodeNeededGB);
+      sizeIndex = nextSizeIndex < 0 ? DISK_TB.length - 1 : nextSizeIndex;
+      diskGB = DISK_TB[sizeIndex] * 1024;
+      rawNeededGB = rawNeededForDiskSize(diskGB);
+      rawPerNodeNeededGB = rawNeededGB / n;
+    }
+
+    let storageUtil = Math.round(rawNeededGB / Math.max(disks * diskGB * n, 1) * 100);
+    for (let attempt = 0; storageUtil > STORAGE_HEADROOM * 100 && attempt < 30; attempt++) {
       if (disks < maxDisks) {
         disks++;
       } else if (sizeIndex < DISK_TB.length - 1) {
         sizeIndex++;
         diskGB = DISK_TB[sizeIndex] * 1024;
-        const rawPerNode = (need.storageGB * factor + PLATFORM_VOLUMES_GB * factor + Math.min(n, 4) * diskGB) / n;
-        disks = Math.min(maxDisks, Math.max(minimumDisks, Math.ceil(rawPerNode / diskGB)));
+        rawNeededGB = rawNeededForDiskSize(diskGB);
       } else {
         break;
       }
+      storageUtil = Math.round(rawNeededGB / Math.max(disks * diskGB * n, 1) * 100);
     }
   }
   return { disks, diskTB: DISK_TB[sizeIndex], diskGB };
@@ -418,15 +432,15 @@ function buildConfig(name, nodes, nodeUserSet, params, hw, res, demands, need, p
     futureGrowth: "0", sizeFor5YrGrowth: false,
     resiliency: RESILIENCY[nodes < 3 ? 0 : res],
     cpuManufacturer: hw.generation.manufacturer, cpuGeneration: hw.generation.id,
-    cpuCores: String(hw.coresPerSocket), cpuSockets: String(hw.sockets), cpuConfigUserSet: true,
-    nodeMemory: String(hw.memoryGB), memoryUserSet: true,
+    cpuCores: String(hw.coresPerSocket), cpuSockets: String(hw.sockets), cpuConfigUserSet: nodeUserSet,
+    nodeMemory: String(hw.memoryGB), memoryUserSet: nodeUserSet,
     gpuCount: "0", gpuType: "a2",
     vcpuRatio: String(hw.ratio), vcpuRatioUserSet: true,
     storageConfig: "all-flash", storageTiering: "ssd-capacity",
     capacityDiskCount: String(hw.diskCount), capacityDiskSize: String(hw.diskTB),
     cacheDiskCount: "2", cacheDiskSize: "1.92",
     tieredCapacityDiskCount: "4", tieredCapacityDiskSize: "3.84",
-    diskSizeUserSet: true, diskCountUserSet: true,
+    diskSizeUserSet: !hw.autoDisks, diskCountUserSet: !hw.autoDisks,
     repairDiskCount: String(Math.min(nodes, 4)), repairDisksUserSet: false,
     workloads, workloadIdCounter: workloads.length, instanceCount: "1",
     powerPriceInput: "", multiPowerPriceInput: "",
