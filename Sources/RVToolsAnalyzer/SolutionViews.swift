@@ -139,7 +139,11 @@ struct SolutionView: View {
                 VMSelectionView(vms: report.inventory.vms, selection: selection,
                                 badges: solution.selections.filter { $0 != active }.map { ($0.label, model.solutionSelections[$0.key(solution.id)] ?? []) })
             case 1:
-                AssumptionsForm(solutionID: solution.id, parameters: solution.parameters, values: values)
+                let showsSizingPreview = solution.id == "odin-azure-local"
+                let _ = model.scriptRunVersion
+                let sizingPreview = showsSizingPreview ? model.result(for: solution) : nil
+                AssumptionsForm(solutionID: solution.id, parameters: solution.parameters, values: values,
+                                showsSizingPreview: showsSizingPreview, sizingPreview: sizingPreview)
             default:
                 let _ = model.priceVersion
                 let _ = model.scriptRunVersion
@@ -450,6 +454,8 @@ struct AssumptionsForm: View {
     var solutionID = ""
     let parameters: [SolutionParameter]
     @Binding var values: ParamValues
+    var showsSizingPreview = false
+    var sizingPreview: SolutionResult?
 
     var body: some View {
         var seen = Set<String>()
@@ -461,6 +467,9 @@ struct AssumptionsForm: View {
                         ParameterRow(solutionID: solutionID, parameter: p, values: $values)
                     }
                 }
+                if showsSizingPreview && group == "Node hardware" {
+                    sizingPreviewSection
+                }
             }
             Section {
                 HStack {
@@ -471,6 +480,43 @@ struct AssumptionsForm: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    @ViewBuilder
+    private var sizingPreviewSection: some View {
+        Section("Automatic hardware sizing") {
+            if let sizingPreview, let sizingMetrics = automaticSizingMetrics(in: sizingPreview) {
+                ForEach(Array(sizingMetrics.enumerated()), id: \.offset) { _, metric in
+                    HStack(alignment: .top, spacing: 12) {
+                        Label(metric.label, systemImage: metric.symbol ?? "cpu")
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 8)
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(metric.value).font(.headline)
+                            if !metric.detail.isEmpty {
+                                Text(metric.detail).font(.caption).foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.trailing)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 3)
+                }
+                Text("Final server hardware specification is on the Results page.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if let sizingPreview {
+                Text(sizingPreview.vmCount == 0 ? "Select VMs on the first step to calculate hardware sizing." : "Automatic sizing is unavailable; see Results for details.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ProgressView("Calculating from the selected VMs and assumptions…")
+            }
+        }
+    }
+
+    private func automaticSizingMetrics(in result: SolutionResult) -> [SolutionMetric]? {
+        for section in result.sections {
+            if case .metrics("Automatic hardware sizing", let metrics) = section { return metrics }
+        }
+        return nil
     }
 }
 
