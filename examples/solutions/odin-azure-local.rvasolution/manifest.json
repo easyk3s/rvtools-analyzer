@@ -4,7 +4,7 @@
   "title": "Azure Local Sizer (ODIN)",
   "symbol": "server.rack",
   "summary": "Size the selected VMs onto Azure Local nodes, and open the same workloads pre-loaded in ODIN for Azure Local.",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "author": "RVTools Analyzer examples",
   "defaultSelection": "poweredOn",
   "parameters": [
@@ -63,7 +63,7 @@
         "Fixed"
       ],
       "default": 0,
-      "help": "Auto follows ODIN's recommendation: scale CPU, memory and storage for the workload, then add nodes until utilization is below 90%. Choose Fixed to evaluate a specific node count."
+      "help": "Auto follows ODIN's recommendation, preferring 1536 GB per node for clusters under 10 nodes and using higher memory when needed. Choose Fixed to evaluate a specific node count."
     },
     {
       "id": "nodeCount",
@@ -93,8 +93,8 @@
         "Two-way mirror",
         "Three-way mirror"
       ],
-      "default": 0,
-      "help": "Three-way mirror needs 3 or more nodes. Two-node rows are always evaluated with a two-way mirror."
+      "default": 1,
+      "help": "Matches ODIN's default of three-way mirror. Two-way mirror is available when you choose it; two-node rows are always evaluated with a two-way mirror."
     },
     {
       "id": "generation",
@@ -210,8 +210,8 @@
       "label": "Capacity disks per node (fixed mode)",
       "default": 4,
       "min": 2,
-      "max": 40,
-      "help": "Used when automatic disk sizing is off. ODIN supports up to 40 all-flash capacity disks per node."
+      "max": 24,
+      "help": "Used when automatic disk sizing is off. ODIN supports up to 24 all-flash capacity disks per node."
     },
     {
       "id": "autoDisks",
@@ -226,10 +226,10 @@
       "type": "number",
       "group": "Storage",
       "label": "Maximum capacity disks per node",
-      "default": 40,
+      "default": 24,
       "min": 2,
-      "max": 40,
-      "help": "ODIN's all-flash maximum is 40 drives; lower this to match the server chassis."
+      "max": 24,
+      "help": "ODIN's all-flash maximum is 24 drives; lower this to match the server chassis."
     },
     {
       "id": "diskSize",
@@ -242,14 +242,10 @@
         "3.84",
         "5.68",
         "7.68",
-        "8",
-        "12",
-        "15.36",
-        "16",
-        "20"
+        "15.36"
       ],
       "default": 2,
-      "help": "Matches ODIN's supported all-flash capacity-disk sizes in TB. Auto sizing may step up from the selected size."
+      "help": "Matches ODIN's supported all-flash capacity-disk sizes in TB. Auto sizing may consolidate to a larger disk size when that reduces bay usage."
     }
   ]
 }
