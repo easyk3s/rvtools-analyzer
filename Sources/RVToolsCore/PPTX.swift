@@ -17,12 +17,17 @@ public struct DeckOptions: Sendable {
     /// Keep every master and layout of the template, so more slides can be added in its style. Otherwise the deck keeps only
     /// the two layouts it uses, which can make it much smaller when layouts carry photos.
     public var keepTemplateLayouts: Bool
+    /// Section indexes to include, or nil to include every section.
+    public var includedSectionIndices: Set<Int>?
+    public var includeHeadline: Bool
 
     public init(title: String, subtitle: String = "", date: String = "", issueDetails: Int = 5,
-                includeReadyChecks: Bool = false, includeAssumptions: Bool = true, template: URL? = nil, keepTemplateLayouts: Bool = false) {
+                includeReadyChecks: Bool = false, includeAssumptions: Bool = true, template: URL? = nil, keepTemplateLayouts: Bool = false,
+                includedSectionIndices: Set<Int>? = nil, includeHeadline: Bool = true) {
         self.title = title; self.subtitle = subtitle; self.date = date; self.issueDetails = issueDetails
         self.includeReadyChecks = includeReadyChecks; self.includeAssumptions = includeAssumptions; self.template = template
         self.keepTemplateLayouts = keepTemplateLayouts
+        self.includedSectionIndices = includedSectionIndices; self.includeHeadline = includeHeadline
     }
 }
 
@@ -74,11 +79,12 @@ enum DeckBlocks {
 
     static func from(_ r: SolutionResult, _ o: DeckOptions) -> [DeckBlock] {
         var out: [DeckBlock] = [.title(o.title, o.subtitle, o.date)]
-        var headline: String? = r.headline.isEmpty ? nil : r.headline
-        if let h = headline, !r.sections.contains(where: { if case .metrics = $0 { return true }; return false }) {
+        let sections = r.sections.enumerated().filter { o.includedSectionIndices?.contains($0.offset) ?? true }.map(\.element)
+        var headline: String? = o.includeHeadline && !r.headline.isEmpty ? r.headline : nil
+        if let h = headline, !sections.contains(where: { if case .metrics = $0 { return true }; return false }) {
             out.append(.headline(h)); headline = nil
         }
-        for section in r.sections {
+        for section in sections {
             switch section {
             case .metrics(let t, let metrics):
                 out.append(.metrics(t.isEmpty ? "Summary" : t, headline, metrics)); headline = nil

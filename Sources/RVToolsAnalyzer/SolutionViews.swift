@@ -103,7 +103,7 @@ struct SolutionView: View {
                 .menuStyle(.borderedButton).fixedSize()
                 .help("Export the report as Markdown and CSV, or pick PowerPoint from the menu")
                 .disabled(inScope == 0)
-                .sheet(isPresented: $showDeckSheet) { DeckExportSheet(solution: solution).environment(model) }
+                .sheet(isPresented: $showDeckSheet) { DeckExportSheet(solution: solution, result: model.result(for: solution)).environment(model) }
                 if let custom = solution as? ScriptedSolution { CustomSolutionMenu(solution: custom) }
             }
             .padding(.horizontal, 20).padding(.vertical, 12)
@@ -940,14 +940,18 @@ private struct TableCard: View {
     }
 }
 
-/// Options for exporting a solution's results as a PowerPoint deck. Choices other than the title lines are remembered.
+/// Options for exporting a solution's results as a PowerPoint deck.
 struct DeckExportSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let solution: any Solution
+    let result: SolutionResult?
     @State private var title = ""
     @State private var subtitle = ""
     @State private var date = ""
+    @State private var selectedSectionIndices = Set<Int>()
+    @State private var includeHeadline = true
+    @State private var showSectionChoices = true
     @AppStorage("deckIssueDetails", store: AppDefaults.store) private var issueDetails = 5
     @AppStorage("deckReadyChecks", store: AppDefaults.store) private var readyChecks = false
     @AppStorage("deckAssumptions", store: AppDefaults.store) private var assumptions = true
@@ -969,6 +973,21 @@ struct DeckExportSheet: View {
                     TextField("Date line", text: $date)
                 }
                 Section("Content") {
+                    if let result, !result.headline.isEmpty {
+                        Toggle("Include the headline", isOn: $includeHeadline)
+                    }
+                    if let result, !result.sections.isEmpty {
+                        DisclosureGroup("Result sections (\(selectedSectionIndices.count)/\(result.sections.count))", isExpanded: $showSectionChoices) {
+                            HStack {
+                                Button("All") { selectedSectionIndices = Set(result.sections.indices) }
+                                Button("None") { selectedSectionIndices.removeAll() }
+                            }
+                            ForEach(result.sections.indices, id: \.self) { index in
+                                Toggle(sectionLabel(result.sections[index], index: index), isOn: sectionBinding(index))
+                                    .font(.callout)
+                            }
+                        }
+                    }
                     Stepper(value: $issueDetails, in: 0...25) {
                         Text(issueDetails == 0 ? "No slides for individual checks" : "A slide for each of the top \(issueDetails) checks")
                     }
@@ -1004,7 +1023,9 @@ struct DeckExportSheet: View {
                 Button("Export…") {
                     let options = DeckOptions(title: title.isEmpty ? solution.title : title, subtitle: subtitle, date: date, issueDetails: issueDetails,
                                               includeReadyChecks: readyChecks, includeAssumptions: assumptions, template: template,
-                                              keepTemplateLayouts: keepLayouts)
+                                              keepTemplateLayouts: keepLayouts,
+                                              includedSectionIndices: result == nil ? nil : selectedSectionIndices,
+                                              includeHeadline: includeHeadline)
                     dismiss()
                     // Let the sheet close before the save panel opens.
                     DispatchQueue.main.async { model.exportDeck(solution, options) }
@@ -1017,7 +1038,33 @@ struct DeckExportSheet: View {
         .onAppear {
             let defaults = model.deckDefaults(solution)
             title = solution.title; subtitle = defaults.subtitle; date = defaults.date
+            if let result {
+                selectedSectionIndices = Set(result.sections.indices)
+                includeHeadline = !result.headline.isEmpty
+            }
         }
+    }
+
+    private func sectionBinding(_ index: Int) -> Binding<Bool> {
+        Binding(
+            get: { selectedSectionIndices.contains(index) },
+            set: { isSelected in
+                if isSelected { selectedSectionIndices.insert(index) }
+                else { selectedSectionIndices.remove(index) }
+            }
+        )
+    }
+
+    private func sectionLabel(_ section: SolutionSection, index: Int) -> String {
+        let title: String
+        switch section {
+        case .metrics(let sectionTitle, _): title = sectionTitle.isEmpty ? "Summary" : sectionTitle
+        case .checks(let sectionTitle, _, _): title = sectionTitle.isEmpty ? "Checks" : sectionTitle
+        case .table(let table): title = table.title
+        case .bars(let sectionTitle, _, _, _): title = sectionTitle
+        case .notes(let sectionTitle, _): title = sectionTitle
+        }
+        return "\(index + 1). \(title)"
     }
 
     private func chooseTemplate() {

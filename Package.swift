@@ -14,6 +14,7 @@ let package = Package(
         .target(name: "RVToolsCore"),
         // The SwiftUI dashboard app.
         .executableTarget(name: "RVToolsAnalyzer", dependencies: ["RVToolsCore"]),
+        .testTarget(name: "RVToolsCoreTests", dependencies: ["RVToolsCore"]),
         // Headless runner: prints the same analysis to the terminal (handy for testing / scripting).
         .executableTarget(name: "rvtools-cli", dependencies: ["RVToolsCore"]),
         // A small web page, served from this Mac, where people upload an RVTools export and get a recipe's decks back as a .zip.
