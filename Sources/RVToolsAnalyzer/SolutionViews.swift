@@ -950,8 +950,8 @@ struct DeckExportSheet: View {
     @State private var subtitle = ""
     @State private var date = ""
     @State private var selectedSectionIndices = Set<Int>()
+    @State private var selectedCheckAreas = Set<String>()
     @State private var includeHeadline = true
-    @State private var showSectionChoices = true
     @AppStorage("deckIssueDetails", store: AppDefaults.store) private var issueDetails = 5
     @AppStorage("deckReadyChecks", store: AppDefaults.store) private var readyChecks = false
     @AppStorage("deckAssumptions", store: AppDefaults.store) private var assumptions = true
@@ -961,6 +961,15 @@ struct DeckExportSheet: View {
     private var template: URL? {
         guard !templatePath.isEmpty, FileManager.default.fileExists(atPath: templatePath) else { return nil }
         return URL(fileURLWithPath: templatePath)
+    }
+
+    private var checkAreas: [String] {
+        guard let result else { return [] }
+        var seen = Set<String>()
+        return result.sections.flatMap { section -> [String] in
+            guard case .checks(_, let checks, _) = section else { return [] }
+            return checks.map(\.area).filter { seen.insert($0).inserted }
+        }
     }
 
     var body: some View {
@@ -977,21 +986,33 @@ struct DeckExportSheet: View {
                         Toggle("Include the headline", isOn: $includeHeadline)
                     }
                     if let result, !result.sections.isEmpty {
-                        DisclosureGroup("Result sections (\(selectedSectionIndices.count)/\(result.sections.count))", isExpanded: $showSectionChoices) {
+                        LabeledContent("Result sections (\(selectedSectionIndices.count)/\(result.sections.count))") {
                             HStack {
                                 Button("All") { selectedSectionIndices = Set(result.sections.indices) }
                                 Button("None") { selectedSectionIndices.removeAll() }
                             }
-                            ForEach(result.sections.indices, id: \.self) { index in
-                                Toggle(sectionLabel(result.sections[index], index: index), isOn: sectionBinding(index))
-                                    .font(.callout)
+                        }
+                        ForEach(result.sections.indices, id: \.self) { index in
+                            Toggle(sectionLabel(result.sections[index], index: index), isOn: sectionBinding(index))
+                                .font(.callout)
+                        }
+                    }
+                    if !checkAreas.isEmpty {
+                        LabeledContent("Check areas (\(selectedCheckAreas.intersection(Set(checkAreas)).count)/\(checkAreas.count))") {
+                            HStack {
+                                Button("All") { selectedCheckAreas.formUnion(checkAreas) }
+                                Button("None") { selectedCheckAreas.subtract(checkAreas) }
                             }
+                        }
+                        ForEach(checkAreas, id: \.self) { area in
+                            Toggle(area, isOn: checkAreaBinding(area))
+                                .font(.callout)
                         }
                     }
                     Stepper(value: $issueDetails, in: 0...25) {
-                        Text(issueDetails == 0 ? "No slides for individual checks" : "A slide for each of the top \(issueDetails) checks")
+                        Text(issueDetails == 0 ? "No slides for individual checks" : "A slide for each of the top \(issueDetails) checks per area")
                     }
-                    .help("Blockers first, then warnings, then info: what was found, the recommendation and the affected objects")
+                    .help("Up to this many detailed slides per check area, prioritizing blockers, then warnings, then info")
                     Toggle("List passed checks in checks tables", isOn: $readyChecks)
                     Toggle("End with the assumptions", isOn: $assumptions)
                 }
@@ -1025,6 +1046,7 @@ struct DeckExportSheet: View {
                                               includeReadyChecks: readyChecks, includeAssumptions: assumptions, template: template,
                                               keepTemplateLayouts: keepLayouts,
                                               includedSectionIndices: result == nil ? nil : selectedSectionIndices,
+                                              includedCheckAreas: checkAreas.isEmpty ? nil : selectedCheckAreas,
                                               includeHeadline: includeHeadline)
                     dismiss()
                     // Let the sheet close before the save panel opens.
@@ -1041,8 +1063,19 @@ struct DeckExportSheet: View {
             if let result {
                 selectedSectionIndices = Set(result.sections.indices)
                 includeHeadline = !result.headline.isEmpty
+                selectedCheckAreas = Set(checkAreas)
             }
         }
+    }
+
+    private func checkAreaBinding(_ area: String) -> Binding<Bool> {
+        Binding(
+            get: { selectedCheckAreas.contains(area) },
+            set: { isSelected in
+                if isSelected { selectedCheckAreas.insert(area) }
+                else { selectedCheckAreas.remove(area) }
+            }
+        )
     }
 
     private func sectionBinding(_ index: Int) -> Binding<Bool> {

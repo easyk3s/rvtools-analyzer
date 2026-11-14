@@ -19,15 +19,18 @@ public struct DeckOptions: Sendable {
     public var keepTemplateLayouts: Bool
     /// Section indexes to include, or nil to include every section.
     public var includedSectionIndices: Set<Int>?
+    /// Check areas to include, or nil to include every check area.
+    public var includedCheckAreas: Set<String>?
     public var includeHeadline: Bool
 
     public init(title: String, subtitle: String = "", date: String = "", issueDetails: Int = 5,
                 includeReadyChecks: Bool = false, includeAssumptions: Bool = true, template: URL? = nil, keepTemplateLayouts: Bool = false,
-                includedSectionIndices: Set<Int>? = nil, includeHeadline: Bool = true) {
+                includedSectionIndices: Set<Int>? = nil, includedCheckAreas: Set<String>? = nil, includeHeadline: Bool = true) {
         self.title = title; self.subtitle = subtitle; self.date = date; self.issueDetails = issueDetails
         self.includeReadyChecks = includeReadyChecks; self.includeAssumptions = includeAssumptions; self.template = template
         self.keepTemplateLayouts = keepTemplateLayouts
-        self.includedSectionIndices = includedSectionIndices; self.includeHeadline = includeHeadline
+        self.includedSectionIndices = includedSectionIndices; self.includedCheckAreas = includedCheckAreas
+        self.includeHeadline = includeHeadline
     }
 }
 
@@ -89,7 +92,10 @@ enum DeckBlocks {
             case .metrics(let t, let metrics):
                 out.append(.metrics(t.isEmpty ? "Summary" : t, headline, metrics)); headline = nil
             case .checks(let t, let checks, let subtitle):
-                out += checkBlocks(t.isEmpty ? "Checks" : t, checks, o, subtitle: subtitle)
+                let selected = o.includedCheckAreas.map { areas in checks.filter { areas.contains($0.area) } } ?? checks
+                if o.includedCheckAreas == nil || !selected.isEmpty {
+                    out += checkBlocks(t.isEmpty ? "Checks" : t, selected, o, subtitle: subtitle)
+                }
             case .table(let t):
                 if t.rows.isEmpty { continue }
                 let rows = t.rows.prefix(maxTableRows).enumerated().map { i, row in
@@ -135,7 +141,17 @@ enum DeckBlocks {
         }
         var out: [DeckBlock] = [.table(DeckTable(title: title, subtitle: subtitle, columns: ["Status", "Area", "Check", "Result"], rows: rows,
                                                  fixed: [0: 1.05]))]
-        out += open.prefix(max(0, o.issueDetails)).map { .issue($0) }
+        if o.includedCheckAreas == nil {
+            out += open.prefix(max(0, o.issueDetails)).map { .issue($0) }
+        } else if o.issueDetails > 0 {
+            var detailCounts: [String: Int] = [:]
+            let details = open.filter { check in
+                guard detailCounts[check.area, default: 0] < o.issueDetails else { return false }
+                detailCounts[check.area, default: 0] += 1
+                return true
+            }
+            out += details.map { .issue($0) }
+        }
         return out
     }
 
