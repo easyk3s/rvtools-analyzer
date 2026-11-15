@@ -17,12 +17,20 @@ public struct DeckOptions: Sendable {
     /// Keep every master and layout of the template, so more slides can be added in its style. Otherwise the deck keeps only
     /// the two layouts it uses, which can make it much smaller when layouts carry photos.
     public var keepTemplateLayouts: Bool
+    /// Section indexes to include, or nil to include every section.
+    public var includedSectionIndices: Set<Int>?
+    /// Check areas to include, or nil to include every check area.
+    public var includedCheckAreas: Set<String>?
+    public var includeHeadline: Bool
 
     public init(title: String, subtitle: String = "", date: String = "", issueDetails: Int = 5,
-                includeReadyChecks: Bool = false, includeAssumptions: Bool = true, template: URL? = nil, keepTemplateLayouts: Bool = false) {
+                includeReadyChecks: Bool = false, includeAssumptions: Bool = true, template: URL? = nil, keepTemplateLayouts: Bool = false,
+                includedSectionIndices: Set<Int>? = nil, includedCheckAreas: Set<String>? = nil, includeHeadline: Bool = true) {
         self.title = title; self.subtitle = subtitle; self.date = date; self.issueDetails = issueDetails
         self.includeReadyChecks = includeReadyChecks; self.includeAssumptions = includeAssumptions; self.template = template
         self.keepTemplateLayouts = keepTemplateLayouts
+        self.includedSectionIndices = includedSectionIndices; self.includedCheckAreas = includedCheckAreas
+        self.includeHeadline = includeHeadline
     }
 }
 
@@ -74,16 +82,20 @@ enum DeckBlocks {
 
     static func from(_ r: SolutionResult, _ o: DeckOptions) -> [DeckBlock] {
         var out: [DeckBlock] = [.title(o.title, o.subtitle, o.date)]
-        var headline: String? = r.headline.isEmpty ? nil : r.headline
-        if let h = headline, !r.sections.contains(where: { if case .metrics = $0 { return true }; return false }) {
+        let sections = r.sections.enumerated().filter { o.includedSectionIndices?.contains($0.offset) ?? true }.map(\.element)
+        var headline: String? = o.includeHeadline && !r.headline.isEmpty ? r.headline : nil
+        if let h = headline, !sections.contains(where: { if case .metrics = $0 { return true }; return false }) {
             out.append(.headline(h)); headline = nil
         }
-        for section in r.sections {
+        for section in sections {
             switch section {
             case .metrics(let t, let metrics):
                 out.append(.metrics(t.isEmpty ? "Summary" : t, headline, metrics)); headline = nil
             case .checks(let t, let checks, let subtitle):
-                out += checkBlocks(t.isEmpty ? "Checks" : t, checks, o, subtitle: subtitle)
+                let selected = o.includedCheckAreas.map { areas in checks.filter { areas.contains($0.area) } } ?? checks
+                if o.includedCheckAreas == nil || !selected.isEmpty {
+                    out += checkBlocks(t.isEmpty ? "Checks" : t, selected, o, subtitle: subtitle)
+                }
             case .table(let t):
                 if t.rows.isEmpty { continue }
                 let rows = t.rows.prefix(maxTableRows).enumerated().map { i, row in
@@ -129,7 +141,17 @@ enum DeckBlocks {
         }
         var out: [DeckBlock] = [.table(DeckTable(title: title, subtitle: subtitle, columns: ["Status", "Area", "Check", "Result"], rows: rows,
                                                  fixed: [0: 1.05]))]
-        out += open.prefix(max(0, o.issueDetails)).map { .issue($0) }
+        if o.includedCheckAreas == nil {
+            out += open.prefix(max(0, o.issueDetails)).map { .issue($0) }
+        } else if o.issueDetails > 0 {
+            var detailCounts: [String: Int] = [:]
+            let details = open.filter { check in
+                guard detailCounts[check.area, default: 0] < o.issueDetails else { return false }
+                detailCounts[check.area, default: 0] += 1
+                return true
+            }
+            out += details.map { .issue($0) }
+        }
         return out
     }
 

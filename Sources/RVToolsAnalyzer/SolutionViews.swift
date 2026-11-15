@@ -103,7 +103,7 @@ struct SolutionView: View {
                 .menuStyle(.borderedButton).fixedSize()
                 .help("Export the report as Markdown and CSV, or pick PowerPoint from the menu")
                 .disabled(inScope == 0)
-                .sheet(isPresented: $showDeckSheet) { DeckExportSheet(solution: solution).environment(model) }
+                .sheet(isPresented: $showDeckSheet) { DeckExportSheet(solution: solution, result: model.result(for: solution)).environment(model) }
                 if let custom = solution as? ScriptedSolution { CustomSolutionMenu(solution: custom) }
             }
             .padding(.horizontal, 20).padding(.vertical, 12)
@@ -1115,14 +1115,18 @@ private struct TableCard: View {
     }
 }
 
-/// Options for exporting a solution's results as a PowerPoint deck. Choices other than the title lines are remembered.
+/// Options for exporting a solution's results as a PowerPoint deck.
 struct DeckExportSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let solution: any Solution
+    let result: SolutionResult?
     @State private var title = ""
     @State private var subtitle = ""
     @State private var date = ""
+    @State private var selectedSectionIndices = Set<Int>()
+    @State private var selectedCheckAreas = Set<String>()
+    @State private var includeHeadline = true
     @AppStorage("deckIssueDetails", store: AppDefaults.store) private var issueDetails = 5
     @AppStorage("deckReadyChecks", store: AppDefaults.store) private var readyChecks = false
     @AppStorage("deckAssumptions", store: AppDefaults.store) private var assumptions = true
@@ -1132,6 +1136,15 @@ struct DeckExportSheet: View {
     private var template: URL? {
         guard !templatePath.isEmpty, FileManager.default.fileExists(atPath: templatePath) else { return nil }
         return URL(fileURLWithPath: templatePath)
+    }
+
+    private var checkAreas: [String] {
+        guard let result else { return [] }
+        var seen = Set<String>()
+        return result.sections.flatMap { section -> [String] in
+            guard case .checks(_, let checks, _) = section else { return [] }
+            return checks.map(\.area).filter { seen.insert($0).inserted }
+        }
     }
 
     var body: some View {
@@ -1144,10 +1157,37 @@ struct DeckExportSheet: View {
                     TextField("Date line", text: $date)
                 }
                 Section("Content") {
-                    Stepper(value: $issueDetails, in: 0...25) {
-                        Text(issueDetails == 0 ? "No slides for individual checks" : "A slide for each of the top \(issueDetails) checks")
+                    if let result, !result.headline.isEmpty {
+                        Toggle("Include the headline", isOn: $includeHeadline)
                     }
-                    .help("Blockers first, then warnings, then info: what was found, the recommendation and the affected objects")
+                    if let result, !result.sections.isEmpty {
+                        LabeledContent("Result sections (\(selectedSectionIndices.count)/\(result.sections.count))") {
+                            HStack {
+                                Button("All") { selectedSectionIndices = Set(result.sections.indices) }
+                                Button("None") { selectedSectionIndices.removeAll() }
+                            }
+                        }
+                        ForEach(result.sections.indices, id: \.self) { index in
+                            Toggle(sectionLabel(result.sections[index], index: index), isOn: sectionBinding(index))
+                                .font(.callout)
+                        }
+                    }
+                    if !checkAreas.isEmpty {
+                        LabeledContent("Check areas (\(selectedCheckAreas.intersection(Set(checkAreas)).count)/\(checkAreas.count))") {
+                            HStack {
+                                Button("All") { selectedCheckAreas.formUnion(checkAreas) }
+                                Button("None") { selectedCheckAreas.subtract(checkAreas) }
+                            }
+                        }
+                        ForEach(checkAreas, id: \.self) { area in
+                            Toggle(area, isOn: checkAreaBinding(area))
+                                .font(.callout)
+                        }
+                    }
+                    Stepper(value: $issueDetails, in: 0...25) {
+                        Text(issueDetails == 0 ? "No slides for individual checks" : "A slide for each of the top \(issueDetails) checks per area")
+                    }
+                    .help("Up to this many detailed slides per check area, prioritizing blockers, then warnings, then info")
                     Toggle("List passed checks in checks tables", isOn: $readyChecks)
                     Toggle("End with the assumptions", isOn: $assumptions)
                 }
@@ -1179,7 +1219,10 @@ struct DeckExportSheet: View {
                 Button("Export…") {
                     let options = DeckOptions(title: title.isEmpty ? solution.title : title, subtitle: subtitle, date: date, issueDetails: issueDetails,
                                               includeReadyChecks: readyChecks, includeAssumptions: assumptions, template: template,
-                                              keepTemplateLayouts: keepLayouts)
+                                              keepTemplateLayouts: keepLayouts,
+                                              includedSectionIndices: result == nil ? nil : selectedSectionIndices,
+                                              includedCheckAreas: checkAreas.isEmpty ? nil : selectedCheckAreas,
+                                              includeHeadline: includeHeadline)
                     dismiss()
                     // Let the sheet close before the save panel opens.
                     DispatchQueue.main.async { model.exportDeck(solution, options) }
@@ -1192,7 +1235,44 @@ struct DeckExportSheet: View {
         .onAppear {
             let defaults = model.deckDefaults(solution)
             title = solution.title; subtitle = defaults.subtitle; date = defaults.date
+            if let result {
+                selectedSectionIndices = Set(result.sections.indices)
+                includeHeadline = !result.headline.isEmpty
+                selectedCheckAreas = Set(checkAreas)
+            }
         }
+    }
+
+    private func checkAreaBinding(_ area: String) -> Binding<Bool> {
+        Binding(
+            get: { selectedCheckAreas.contains(area) },
+            set: { isSelected in
+                if isSelected { selectedCheckAreas.insert(area) }
+                else { selectedCheckAreas.remove(area) }
+            }
+        )
+    }
+
+    private func sectionBinding(_ index: Int) -> Binding<Bool> {
+        Binding(
+            get: { selectedSectionIndices.contains(index) },
+            set: { isSelected in
+                if isSelected { selectedSectionIndices.insert(index) }
+                else { selectedSectionIndices.remove(index) }
+            }
+        )
+    }
+
+    private func sectionLabel(_ section: SolutionSection, index: Int) -> String {
+        let title: String
+        switch section {
+        case .metrics(let sectionTitle, _): title = sectionTitle.isEmpty ? "Summary" : sectionTitle
+        case .checks(let sectionTitle, _, _): title = sectionTitle.isEmpty ? "Checks" : sectionTitle
+        case .table(let table): title = table.title
+        case .bars(let sectionTitle, _, _, _): title = sectionTitle
+        case .notes(let sectionTitle, _): title = sectionTitle
+        }
+        return "\(index + 1). \(title)"
     }
 
     private func chooseTemplate() {
