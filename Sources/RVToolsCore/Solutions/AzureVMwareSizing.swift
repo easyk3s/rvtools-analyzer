@@ -678,7 +678,7 @@ public struct AzureVMwareSizing: PricedSolution {
             case .choice: v.values[spec.id] = .choice(p.choice(spec.id))
             case .toggle: v.values[spec.id] = .flag(p.flag(spec.id))
             case .multi: v.values[spec.id] = .selection(p.multi(spec.id))
-            case .clusters, .clusterPairs, .host: v.values[spec.id] = .names(p.names(spec.id))
+            case .clusters, .clusterPairs, .host, .clusterGroups, .clusterValues, .hostMoves, .hostList: v.values[spec.id] = .names(p.names(spec.id))
             }
         }
         v.values["term"] = .choice(t.rawValue)

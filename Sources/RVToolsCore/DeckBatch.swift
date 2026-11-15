@@ -127,6 +127,26 @@ public extension ParamValues {
             case .clusters: v.values[name] = .names(value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
             // "A=B,C=D", by cluster name or id.
             case .clusterPairs: v.values[name] = .names(value.split(separator: ",").flatMap { $0.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) } })
+            // "A+B,C+D", by cluster name or id.
+            case .clusterGroups:
+                v.values[name] = .names(value.split(separator: ",").map { g in
+                    PlanEntry.join(g.split(separator: "+").map { $0.trimmingCharacters(in: .whitespaces) })
+                })
+            case .hostList: v.values[name] = .names(value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+            // "A=1536,B=0".
+            case .clusterValues:
+                v.values[name] = .names(value.split(separator: ",").compactMap { e in
+                    let kv = e.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                    return kv.count == 2 ? PlanEntry.join(kv) : nil
+                })
+            // "A:family>B,C:*>release", family as a CPU family key (intel-sp45) or * for every host.
+            case .hostMoves:
+                v.values[name] = .names(value.split(separator: ",").compactMap { e in
+                    let to = e.split(separator: ">", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                    guard to.count == 2 else { return nil }
+                    let from = to[0].split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                    return PlanEntry.join([from[0], from.count > 1 ? from[1] : HostMove.all, to[1]])
+                })
             }
         }
         return v

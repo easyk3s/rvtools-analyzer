@@ -436,7 +436,7 @@ public struct AlternateHypervisors: Solution {
                                                                  vcSize: A.vcenterSize(hosts: hosts, vms: vms),
                                                                  nsxSize: A.nsxSize(hosts: hosts, clusters: clusters))] : []
                 return VCF9Sizing.managementComponents(deploy, vcfOps: ops, vcfAuto: false, logs: nil, logReplicas: 3, rtm: false, edges: nil,
-                                                       mgmtNSXSize: deploy == .haLarge ? "Large" : "Medium", extra: A.Spec(0, 0, 0),
+                                                       mgmtNSXSize: A.managementNSXSize, extra: A.Spec(0, 0, 0),
                                                        domains: wld, newVCenters: true, wldNSXNodes: 3)
             }
             pr.mgmtDedicated = dedicated

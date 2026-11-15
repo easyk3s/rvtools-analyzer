@@ -84,7 +84,7 @@ public extension Solution {
 
 public enum SolutionCatalog {
     /// The solutions that ship with the app.
-    public static let builtIn: [any Solution] = [BackupSizing(), DisasterRecoverySizing(), VCF9Readiness(), VCF9Sizing(), CloudMigration(.azure), CloudMigration(.aws), AzureVMwareSizing(), AlternateHypervisors()]
+    public static let builtIn: [any Solution] = [BackupSizing(), DisasterRecoverySizing(), VCF9Readiness(), VCF9Sizing(), CloudMigration(.azure), CloudMigration(.aws), AzureVMwareSizing(), AlternateHypervisors(), WorkloadConsolidation()]
     /// Enabled custom solutions, in title order.
     public static var custom: [ScriptedSolution] { SolutionLibrary.shared.enabled }
     /// Built-in solutions followed by enabled custom solutions.
@@ -133,6 +133,15 @@ public struct SolutionParameter: Identifiable, Sendable {
         /// One host from the open export, stored by host id; hosts with the same CPU and memory are offered once.
         /// `none` labels the empty choice (e.g. "Typical host").
         case host(none: String)
+        /// Groups of clusters from the open export: one entry per group, its cluster ids joined by `PlanEntry.separator`.
+        case clusterGroups
+        /// One value per cluster, from a fixed list: entries of cluster id and value joined by `PlanEntry.separator`.
+        case clusterValues(values: [Double], labels: [String])
+        /// Host moves: entries of source cluster id, CPU family key (`HostMove.all` for every host) and destination joined by
+        /// `PlanEntry.separator`. The destination is a cluster id, `HostMove.release` or `HostMove.keep`.
+        case hostMoves
+        /// Hosts from the open export, stored by host id.
+        case hostList
     }
 
     public let id: String
@@ -173,8 +182,50 @@ public struct SolutionParameter: Identifiable, Sendable {
         SolutionParameter(id: id, group: group, label: label, help: help, kind: .host(none: none), defaultValue: .names([]))
     }
 
+    public static func clusterGroups(_ id: String, _ group: String, _ label: String, help: String = "") -> SolutionParameter {
+        SolutionParameter(id: id, group: group, label: label, help: help, kind: .clusterGroups, defaultValue: .names([]))
+    }
+
+    public static func clusterValues(_ id: String, _ group: String, _ label: String, values: [Double], labels: [String], help: String = "") -> SolutionParameter {
+        SolutionParameter(id: id, group: group, label: label, help: help, kind: .clusterValues(values: values, labels: labels), defaultValue: .names([]))
+    }
+
+    public static func hostList(_ id: String, _ group: String, _ label: String, help: String = "") -> SolutionParameter {
+        SolutionParameter(id: id, group: group, label: label, help: help, kind: .hostList, defaultValue: .names([]))
+    }
+
+    public static func hostMoves(_ id: String, _ group: String, _ label: String, help: String = "") -> SolutionParameter {
+        SolutionParameter(id: id, group: group, label: label, help: help, kind: .hostMoves, defaultValue: .names([]))
+    }
+
     public func display(_ value: ParamValue, inventory: Inventory? = nil) -> String {
+        func clusterName(_ id: String) -> String {
+            inventory?.clusters.first { $0.id == id }?.name ?? String(id.split(separator: "|").last ?? Substring(id))
+        }
         switch (kind, value) {
+        case (.clusterGroups, .names(let entries)):
+            let groups = entries.map { PlanEntry.parts($0).filter { !$0.isEmpty }.map(clusterName) }.filter { $0.count > 1 }
+            return groups.isEmpty ? "None" : groups.map { $0.joined(separator: " + ") }.joined(separator: "; ")
+        case (.clusterValues(let values, let labels), .names(let entries)):
+            let rows = entries.compactMap { e -> String? in
+                let p = PlanEntry.parts(e)
+                guard p.count == 2, !p[0].isEmpty, let v = Double(p[1]) else { return nil }
+                let label = values.firstIndex(of: v).flatMap { labels.indices.contains($0) ? labels[$0] : nil } ?? SFmt.num(v)
+                return "\(clusterName(p[0])): \(label)"
+            }
+            return rows.isEmpty ? "None" : rows.joined(separator: "; ")
+        case (.hostList, .names(let ids)):
+            let names = ids.map { id in inventory.flatMap { HostSpecs.resolve(id, in: $0)?.name } ?? String(id.split(separator: "|").last ?? Substring(id)) }
+            return names.isEmpty ? "None" : names.joined(separator: ", ")
+        case (.hostMoves, .names(let entries)):
+            let rows = entries.compactMap { e -> String? in
+                let p = PlanEntry.parts(e)
+                guard p.count == 3, !p[0].isEmpty, !p[2].isEmpty else { return nil }
+                let what = p[1] == HostMove.all ? "all hosts" : CPUFamily.label(p[1]) + " hosts"
+                let to = p[2] == HostMove.release ? "release" : (p[2] == HostMove.keep ? "keep in place" : (p[2] == HostMove.retire ? "retire" : clusterName(p[2])))
+                return "\(clusterName(p[0])) · \(what) → \(to)"
+            }
+            return rows.isEmpty ? "None" : rows.joined(separator: "; ")
         case (.host(let none), .names(let ids)):
             guard let id = ids.first else { return none }
             if let h = inventory.flatMap({ HostSpecs.resolve(id, in: $0) }) { return HostSpecs.label(h) }
@@ -201,6 +252,26 @@ public struct SolutionParameter: Identifiable, Sendable {
     }
 }
 
+/// Entries of the list-valued parameter kinds (cluster groups, values per cluster, host moves): fields joined by a newline,
+/// which no cluster id contains.
+public enum PlanEntry {
+    public static let separator = "\n"
+    public static func parts(_ entry: String) -> [String] { entry.components(separatedBy: separator) }
+    public static func join(_ parts: [String]) -> String { parts.joined(separator: separator) }
+}
+
+/// Special values in a `hostMoves` entry.
+public enum HostMove {
+    /// Every host of the source cluster, whatever its CPU.
+    public static let all = "*"
+    /// Destination: out of the cluster, into the spare pool.
+    public static let release = "release"
+    /// Destination: stay put; recommendations don't move or release these hosts.
+    public static let keep = "keep"
+    /// Destination: decommissioned; never reused.
+    public static let retire = "retire"
+}
+
 /// User-edited values; anything missing falls back to the parameter's default.
 public struct ParamValues: Codable, Hashable, Sendable {
     public var values: [String: ParamValue]
@@ -218,6 +289,12 @@ public struct Params {
     }
 
     private func value(_ id: String) -> ParamValue? { values.values[id] ?? specs[id]?.defaultValue }
+    /// The same values with one changed, for a solution that tries a what-if on itself.
+    public func setting(_ id: String, _ v: ParamValue) -> Params {
+        var vals = values
+        vals.values[id] = v
+        return Params(Array(specs.values), vals)
+    }
     public func num(_ id: String) -> Double { if case .number(let x)? = value(id) { return x }; return 0 }
     public func choice(_ id: String) -> Int { if case .choice(let i)? = value(id) { return i }; return 0 }
     public func flag(_ id: String) -> Bool { if case .flag(let b)? = value(id) { return b }; return false }

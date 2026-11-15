@@ -563,7 +563,7 @@ private struct ParameterRow: View {
         let chosen: [String] = { if case .names(let n) = current { return n }; return [] }()
         let known = Set(clusters.map(\.id))
         let missing = chosen.filter { !known.contains($0) }
-        let label: (Cluster) -> String = { "\($0.name) (\($0.vcenter)) · \($0.hostCount) hosts" }
+        let label: (Cluster) -> String = { "\($0.name)\($0.vcenter.isEmpty ? "" : " (\($0.vcenter))") · \($0.hostCount) hosts" }
         if multi {
             Text(parameter.label)
             if clusters.isEmpty { Text("No clusters in this export.").font(.caption).foregroundStyle(.secondary) }
@@ -660,9 +660,184 @@ private struct ParameterRow: View {
         }
     }
 
+    private var plannableClusters: [Cluster] {
+        (model.report?.inventory.clusters ?? []).filter { !$0.isStandalone && $0.hostCount > 0 }
+            .sorted { ($0.datacenter.lowercased(), $0.name.lowercased()) < ($1.datacenter.lowercased(), $1.name.lowercased()) }
+    }
+    private var entries: [String] { if case .names(let n) = current { return n }; return [] }
+    private func setEntries(_ n: [String]) { values.values[parameter.id] = .names(n) }
+    private func clusterName(_ id: String) -> String {
+        plannableClusters.first { $0.id == id }?.name ?? (id.isEmpty ? "Choose…" : "\(String(id.split(separator: "|").last ?? "")) — not in this export")
+    }
+    private func clusterLabel(_ c: Cluster) -> String {
+        [c.name, c.datacenter.isEmpty ? nil : c.datacenter, "\(c.hostCount) hosts"].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// Rows of clusters merged into one; a cluster can be in one group only.
+    @ViewBuilder private func clusterGroupPicker() -> some View {
+        let groups = entries.map { PlanEntry.parts($0).filter { !$0.isEmpty } }
+        let used = Set(groups.flatMap { $0 })
+        Text(parameter.label)
+        ForEach(groups.indices, id: \.self) { gi in
+            HStack(alignment: .firstTextBaseline) {
+                Text(groups[gi].isEmpty ? "Empty group" : groups[gi].map(clusterName).joined(separator: " + "))
+                    .foregroundStyle(groups[gi].count < 2 ? .secondary : .primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Menu("Add") {
+                    ForEach(plannableClusters.filter { !used.contains($0.id) }) { c in
+                        Button(clusterLabel(c)) { var n = entries; n[gi] = PlanEntry.join(groups[gi] + [c.id]); setEntries(n) }
+                    }
+                }
+                .fixedSize()
+                if !groups[gi].isEmpty {
+                    Menu("Remove") {
+                        ForEach(groups[gi], id: \.self) { id in
+                            Button(clusterName(id)) { var n = entries; n[gi] = PlanEntry.join(groups[gi].filter { $0 != id }); setEntries(n) }
+                        }
+                    }
+                    .fixedSize()
+                }
+                Button { var n = entries; n.remove(at: gi); setEntries(n) } label: { Image(systemName: "minus.circle") }
+                    .buttonStyle(.borderless).help("Remove this group")
+            }
+            .controlSize(.small)
+        }
+        Button("Add group") { setEntries(entries + [""]) }
+            .controlSize(.small)
+            .disabled(plannableClusters.count - used.count < 2)
+    }
+
+    /// Rows of a cluster and a value from the parameter's list.
+    @ViewBuilder private func clusterValuePicker(values options: [Double], labels: [String]) -> some View {
+        let rows = entries.map { PlanEntry.parts($0) }.map { ($0.first ?? "", $0.count > 1 ? (Double($0[1]) ?? 0) : 0) }
+        let used = Set(rows.map(\.0))
+        Text(parameter.label)
+        ForEach(rows.indices, id: \.self) { i in
+            HStack {
+                Picker("Cluster", selection: Binding<String>(
+                    get: { rows[i].0 },
+                    set: { var n = entries; n[i] = PlanEntry.join([$0, String(format: "%g", rows[i].1)]); setEntries(n) })) {
+                    Text("Choose…").tag("")
+                    ForEach(plannableClusters.filter { $0.id == rows[i].0 || !used.contains($0.id) }) { Text(clusterLabel($0)).tag($0.id) }
+                    if !rows[i].0.isEmpty && !plannableClusters.contains(where: { $0.id == rows[i].0 }) { Text(clusterName(rows[i].0)).tag(rows[i].0) }
+                }
+                Picker("Value", selection: Binding<Double>(
+                    get: { rows[i].1 },
+                    set: { var n = entries; n[i] = PlanEntry.join([rows[i].0, String(format: "%g", $0)]); setEntries(n) })) {
+                    ForEach(options.indices, id: \.self) { j in Text(j < labels.count ? labels[j] : String(format: "%g", options[j])).tag(options[j]) }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 140)
+                Button { var n = entries; n.remove(at: i); setEntries(n) } label: { Image(systemName: "minus.circle") }
+                    .buttonStyle(.borderless).help("Remove")
+            }
+        }
+        Button("Add cluster") { setEntries(entries + [PlanEntry.join(["", String(format: "%g", options.first { $0 > 0 } ?? 0)])]) }
+            .controlSize(.small)
+            .disabled(plannableClusters.count <= used.subtracting([""]).count)
+    }
+
+    /// Rows of source cluster, CPU family (or all hosts) and destination.
+    @ViewBuilder private func hostMovePicker() -> some View {
+        let rows = entries.map { PlanEntry.parts($0) }.map { p in (p.first ?? "", p.count > 1 ? p[1] : HostMove.all, p.count > 2 ? p[2] : HostMove.keep) }
+        Text(parameter.label)
+        ForEach(rows.indices, id: \.self) { i in
+            let row = rows[i]
+            let families = model.report.map { CPUFamily.present(in: $0.inventory, cluster: row.0) } ?? []
+            let total = families.reduce(0) { $0 + $1.count }
+            HStack {
+                Picker("From", selection: Binding<String>(
+                    get: { row.0 },
+                    set: { var n = entries; n[i] = PlanEntry.join([$0, HostMove.all, row.2 == $0 ? HostMove.keep : row.2]); setEntries(n) })) {
+                    Text("Choose…").tag("")
+                    ForEach(plannableClusters) { Text(clusterLabel($0)).tag($0.id) }
+                    if !row.0.isEmpty && !plannableClusters.contains(where: { $0.id == row.0 }) { Text(clusterName(row.0)).tag(row.0) }
+                }
+                Picker("Hosts", selection: Binding<String>(
+                    get: { row.1 },
+                    set: { var n = entries; n[i] = PlanEntry.join([row.0, $0, row.2]); setEntries(n) })) {
+                    Text("All hosts (\(total))").tag(HostMove.all)
+                    ForEach(families, id: \.key) { f in Text("\(CPUFamily.short(f.key)) (\(f.count))").tag(f.key) }
+                    if row.1 != HostMove.all && !families.contains(where: { $0.key == row.1 }) { Text(CPUFamily.short(row.1)).tag(row.1) }
+                }
+                .frame(maxWidth: 200)
+                .help(families.map { "\($0.label): \($0.count)" }.joined(separator: "\n"))
+                Picker("To", selection: Binding<String>(
+                    get: { row.2 },
+                    set: { var n = entries; n[i] = PlanEntry.join([row.0, row.1, $0]); setEntries(n) })) {
+                    Text("Keep in place").tag(HostMove.keep)
+                    Text("Release to the spare pool").tag(HostMove.release)
+                    Text("Retire").tag(HostMove.retire)
+                    Divider()
+                    ForEach(plannableClusters.filter { $0.id != row.0 }) { Text(clusterLabel($0)).tag($0.id) }
+                    if ![HostMove.keep, HostMove.release, HostMove.retire].contains(row.2) && !plannableClusters.contains(where: { $0.id == row.2 }) {
+                        Text(clusterName(row.2)).tag(row.2)
+                    }
+                }
+                Button { var n = entries; n.remove(at: i); setEntries(n) } label: { Image(systemName: "minus.circle") }
+                    .buttonStyle(.borderless).help("Remove this move")
+            }
+        }
+        Button("Add move") { setEntries(entries + [PlanEntry.join(["", HostMove.all, HostMove.keep])]) }
+            .controlSize(.small)
+            .disabled(plannableClusters.isEmpty)
+    }
+
+    /// Individual hosts, added from a menu of each cluster's hosts.
+    @ViewBuilder private func hostListPicker() -> some View {
+        let inv = model.report?.inventory
+        let chosen = entries
+        let chosenIDs = Set(chosen.compactMap { id in inv.flatMap { HostSpecs.resolve(id, in: $0)?.id } ?? id })
+        let hosts = (inv?.hosts ?? []).filter { !$0.isVirtual }
+        Text(parameter.label)
+        if !chosen.isEmpty {
+            ForEach(chosen, id: \.self) { id in
+                let h = inv.flatMap { HostSpecs.resolve(id, in: $0) }
+                HStack {
+                    Text(h.map { "\($0.name) · \($0.cluster.isEmpty ? "no cluster" : $0.cluster) · \(CPUBaseline.of($0).name)" }
+                         ?? "\(String(id.split(separator: "|").last ?? "")) — not in this export")
+                        .foregroundStyle(h == nil ? .secondary : .primary)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button { setEntries(entries.filter { $0 != id }) } label: { Image(systemName: "minus.circle") }
+                        .buttonStyle(.borderless).help("Remove")
+                }
+                .controlSize(.small)
+            }
+        }
+        HStack {
+            Menu("Add host") {
+                ForEach(plannableClusters) { c in
+                    let inCluster = hosts.filter { $0.clusterKey == c.id && !chosenIDs.contains($0.id) }.sorted { $0.name.lowercased() < $1.name.lowercased() }
+                    if !inCluster.isEmpty {
+                        Menu(clusterLabel(c)) {
+                            ForEach(inCluster) { h in
+                                Button("\(h.name) · \(CPUBaseline.of(h).name)") { setEntries(entries + [h.id]) }
+                            }
+                        }
+                    }
+                }
+            }
+            .fixedSize()
+            if !chosen.isEmpty {
+                Button("Clear") { setEntries([]) }
+            }
+        }
+        .controlSize(.small)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             switch parameter.kind {
+            case .hostList:
+                hostListPicker()
+            case .clusterGroups:
+                clusterGroupPicker()
+            case .clusterValues(let options, let labels):
+                clusterValuePicker(values: options, labels: labels)
+            case .hostMoves:
+                hostMovePicker()
             case .number(let lo, let hi, let step, let unit):
                 let binding = Binding<Double>(
                     get: { if case .number(let x) = current { return x }; return lo },

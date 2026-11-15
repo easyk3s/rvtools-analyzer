@@ -36,9 +36,13 @@ enum VCFAppliances {
     static let nsxEdge: [String: Spec] = ["Small": Spec(2, 4, 200), "Medium": Spec(4, 8, 200), "Large": Spec(8, 32, 200), "XLarge": Spec(16, 64, 200)]
     static let sddcManager = Spec(4, 16, 914)
     static let runtimeControl: [String: Spec] = ["Small": Spec(4, 10, 100), "Medium": Spec(4, 10, 100), "Large": Spec(8, 14, 100)]
-    /// VCF services runtime worker nodes: vCPU and RAM per node, disk for the set.
+    /// Management NSX Manager size for every deployment model: the VCF 9.1.1 Installer's "Size Options" step deploys Medium
+    /// for HA Small, Medium and Large (the workbook's Large for HA Large doesn't match it).
+    static let managementNSXSize = "Medium"
+    /// VCF services runtime worker nodes: vCPU and RAM per node, disk for the set. HA Large's disk is 4,102 GB rather than
+    /// the workbook's 4,002 so the services total matches the VCF 9.1.1 Installer's 88 vCPU / 170 GB / 4,402 GB.
     static let runtimeWorker: [Deployment: Spec] = [
-        .simple: Spec(12, 24, 2900), .haSmall: Spec(10, 16, 2800), .haMedium: Spec(12, 24, 3300), .haLarge: Spec(16, 32, 4002),
+        .simple: Spec(12, 24, 2900), .haSmall: Spec(10, 16, 2800), .haMedium: Spec(12, 24, 3300), .haLarge: Spec(16, 32, 4102),
     ]
     /// Day-0 services on the workers: Identity Broker, Software Depot, SDDC LCM, Salt, Salt RaaS, Telemetry and Fleet.
     static let runtimeServices: [Deployment: (cpu: Double, ram: Double)] = [
@@ -591,7 +595,7 @@ public struct VCF9Sizing: Solution {
         /// Appliances and workload domains; a consolidated management cluster isn't a workload domain.
         func components(consolidatedOn mgmtCluster: Cluster?, mgmtHosts: Int) -> ([Component], [WorkloadDomain]) {
             let wds = domains(excluding: mgmtCluster)
-            var nsxSize = deploy == .haLarge ? "Large" : "Medium"
+            var nsxSize = A.managementNSXSize
             if wldNSX == 2 {   // shared: the management NSX also carries every workload cluster
                 nsxSize = A.larger(nsxSize, A.nsxSize(hosts: mgmtHosts + wds.reduce(0) { $0 + $1.hosts },
                                                       clusters: 1 + wds.reduce(0) { $0 + $1.clusters.count }))
