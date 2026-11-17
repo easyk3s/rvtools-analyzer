@@ -85,6 +85,85 @@ enum VCFAppliances {
     }
 }
 
+/// vDefend Security Services Platform 5.2 (for Security Intelligence and ATP: NTA, NDR, Malware Prevention) and the License
+/// Hub 2.0 appliance that licenses vDefend and Avi Load Balancer. Sizes in GB from Broadcom's SSP 5.2 "SSP Installer System
+/// Requirements", "Security Services Platform System Requirements" and "Platform Details and Available Features" pages, and
+/// License Hub 2.0's "Appliance System Requirements" page.
+enum SSPAppliances {
+    typealias Spec = VCFAppliances.Spec
+    static let source = "vDefend SSP 5.2 and License Hub 2.0 system requirements"
+    static let installer = Spec(4, 6, 400)
+    /// Three controller nodes in every form factor.
+    static let controller = Spec(4, 8, 75)
+    static let controllers = 3
+    static let worker = Spec(16, 64, 155)
+    /// Broadcom's totals hold one worker's resources back for rolling upgrades.
+    static let upgradeReserve = Spec(16, 64, 155)
+    static let contentLibrary = 50.0
+    static let licenseHub = Spec(6, 12, 256)
+
+    enum FormFactor: Int, CaseIterable {
+        case medium = 0, large, xlarge
+        var name: String { ["Medium", "Large", "Extra Large"][rawValue] }
+        /// Persistent volume claims, by size class.
+        var pvc: Double { [2201, 2209, 4200][rawValue] }
+        var workers: ClosedRange<Int> { [2...2, 4...13, 8...17][rawValue] }
+        /// VMs the form factor is rated for (Platform Details); Broadcom warns past 80%.
+        var vmLimit: Int { [10_000, 36_000, 56_000][rawValue] }
+    }
+
+    enum Features: Int, CaseIterable {
+        case firewall = 0, atp, atpMPS, all
+        var label: String {
+            ["Firewall — Security Intelligence, Rule Analysis, Metrics",
+             "ATP — adds Network Traffic Analysis and NDR",
+             "ATP with Malware Prevention on-premises",
+             "All features — adds AI Assistant and Bare Metal Security"][rawValue]
+        }
+        var short: String { ["Firewall", "ATP (NTA, NDR)", "ATP with Malware Prevention", "all features"][rawValue] }
+        /// Fewest workers for the feature set, from Broadcom's Security Features Form Factor table; nil where the form
+        /// factor doesn't run it (Medium runs the firewall features only). Malware Prevention takes two dedicated workers.
+        func minWorkers(_ f: FormFactor) -> Int? {
+            switch f {
+            case .medium: return self == .firewall ? 2 : nil
+            case .large: return [4, 5, 7, 8][rawValue]
+            case .xlarge: return [8, 8, 10, 10][rawValue]
+            }
+        }
+    }
+
+    /// IP pool minimums from Broadcom's table: the node pool is the workers plus five, the service pool grows by one for
+    /// every two workers past four.
+    static func nodeIPs(workers: Int) -> Int { workers + 5 }
+    static func serviceIPs(workers: Int) -> Int { max(5, 5 + (workers - 4) / 2) }
+
+    struct Plan {
+        let form: FormFactor
+        let features: Features
+        /// Workers the form factor and features need, before the resource-reservation worker.
+        let workers: Int
+        let reservation: Bool
+        let auto: Bool
+        /// The chosen form factor doesn't run the features.
+        let unsupported: Bool
+        /// More workers were asked for than the form factor allows.
+        let capped: Bool
+    }
+
+    /// `choice` 1 is auto; 2–4 are Medium, Large, Extra Large.
+    static func plan(choice: Int, features: Features, requestedWorkers: Int, reservation: Bool, vms: Int) -> Plan? {
+        guard choice > 0 else { return nil }
+        let auto = choice == 1
+        let form = auto
+            ? FormFactor.allCases.first { features.minWorkers($0) != nil && Double(vms) <= Double($0.vmLimit) * 0.8 } ?? .xlarge
+            : FormFactor(rawValue: min(choice - 2, 2))!
+        let least = features.minWorkers(form) ?? form.workers.lowerBound
+        let asked = max(requestedWorkers, least)
+        return Plan(form: form, features: features, workers: min(asked, form.workers.upperBound), reservation: reservation, auto: auto,
+                    unsupported: features.minWorkers(form) == nil, capped: asked > form.workers.upperBound)
+    }
+}
+
 /// Sizes a VCF 9 fleet on the hardware RVTools shows: which hosts can become the management domain (peeled off an
 /// existing cluster, or shared with workloads in a consolidated cluster), what the management appliances need, and what
 /// converging the other clusters into workload domains adds. Management appliance sizing follows the VCF 9.1.1 Planning
@@ -127,6 +206,22 @@ public struct VCF9Sizing: Solution {
                 help: "Anything else that will run in the management domain: directory, DNS, backup proxies, jump hosts."),
         .number("extraRAM", "Management components", "Other management VMs — memory", 0, min: 0, max: 20_000, step: 8, unit: "GB"),
         .number("extraDisk", "Management components", "Other management VMs — disk", 0, min: 0, max: 500_000, step: 100, unit: "GB"),
+        .choice("ssp", "vDefend Security Services Platform", "Security Services Platform (SSP 5.2)", [
+            "None",
+            "Auto — smallest form factor for the features and VMs",
+            "Medium", "Large", "Extra Large",
+        ], help: "vDefend's SSP runs Security Intelligence and, with ATP, Network Traffic Analysis, NDR and Malware Prevention: an installer VM, 3 controllers and 2–17 workers, sized here in the management domain. Auto picks the smallest form factor that runs the features with the VMs in scope under 80% of its rating (Medium 10,000, Large 36,000, Extra Large 56,000)."),
+        .choice("sspFeatures", "vDefend Security Services Platform", "SSP features", SSPAppliances.Features.allCases.map(\.label), selected: 1,
+                help: "Sets the fewest workers, from Broadcom's form factor table: Medium runs the firewall features only; ATP needs Large with 5 workers, 7 with Malware Prevention on-premises (2 dedicated workers), 8 for everything."),
+        .number("sspWorkers", "vDefend Security Services Platform", "SSP worker nodes (0 = fewest for the features)", 0, min: 0, max: 17,
+                help: "More workers for scale. Large takes 4–13, Extra Large 8–17; Medium is fixed at 2."),
+        .toggle("sspReserve", "vDefend Security Services Platform", "SSP resource reservation (one more worker)", true,
+                help: "Recommended for production. With resource reservation on, Broadcom says to add one more worker node to the resources needed."),
+        .choice("licenseHub", "vDefend Security Services Platform", "License Hub 2.0 (licenses vDefend and Avi)", [
+            "With SSP",
+            "Always — also for Avi Load Balancer without SSP",
+            "None",
+        ], help: "One 6 vCPU / 12 GB / 256 GB appliance licenses vDefend and Avi Load Balancer. It isn't needed for vDefend 4.2.x or 9.0.x."),
         .toggle("vvfServices", "vSphere Foundation", "VCF management services", true,
                 help: "Only applies to VVF: VCF always deploys them. Fleet and SDDC lifecycle, software depot and telemetry on the VCF services runtime. Without them VVF is installed by hand (vCenter, VCF Operations, license server) and has no log management or software depot."),
         .choice("vvfVC", "vSphere Foundation", "vCenter", [
@@ -428,6 +523,33 @@ public struct VCF9Sizing: Solution {
         return c
     }
 
+    /// The Security Services Platform's VMs (installer, controllers, workers with the PVC and content library storage, and
+    /// Broadcom's upgrade headroom) and the License Hub appliance. Medium without reservation reconciles to Broadcom's
+    /// 64 vCPU / 222 GB / 3.26 TB (3,341 GB).
+    static func securityComponents(_ plan: SSPAppliances.Plan?, licenseHub: Bool) -> [Component] {
+        typealias S = SSPAppliances
+        var c: [Component] = []
+        if let plan {
+            let workers = plan.workers + (plan.reservation ? 1 : 0)
+            let w = Double(workers)
+            c.append(Component(name: "SSP Installer", nodes: 1, cpu: S.installer.cpu, ram: S.installer.ram, disk: S.installer.disk))
+            let k = Double(S.controllers)
+            c.append(Component(name: "SSP controller nodes", nodes: S.controllers, cpu: S.controller.cpu * k, ram: S.controller.ram * k,
+                               disk: S.controller.disk * k, note: plan.form.name))
+            c.append(Component(name: "SSP worker nodes", nodes: workers, cpu: S.worker.cpu * w, ram: S.worker.ram * w,
+                               disk: S.worker.disk * w + plan.form.pvc + S.contentLibrary,
+                               note: "\(plan.form.name), \(plan.features.short)" + (plan.reservation ? "; \(plan.workers) + 1 for resource reservation" : "")
+                                   + "; disk includes \(SFmt.num(plan.form.pvc)) GB of persistent volumes and the \(SFmt.num(S.contentLibrary)) GB content library"))
+            c.append(Component(name: "SSP upgrade reserve", nodes: 0, cpu: S.upgradeReserve.cpu, ram: S.upgradeReserve.ram, disk: S.upgradeReserve.disk,
+                               note: "one worker's headroom for rolling upgrades, in Broadcom's totals"))
+        }
+        if licenseHub {
+            c.append(Component(name: "License Hub", nodes: 1, cpu: S.licenseHub.cpu, ram: S.licenseHub.ram, disk: S.licenseHub.disk,
+                               note: "licenses vDefend and Avi Load Balancer"))
+        }
+        return c
+    }
+
     // MARK: - Run
 
     public func run(vms: [VM], inventory inv: Inventory, params p: Params) -> SolutionResult {
@@ -592,6 +714,20 @@ public struct VCF9Sizing: Solution {
             }
         }
 
+        // vDefend SSP and License Hub, sized for the VMs vDefend would protect: every VM in the clusters in scope.
+        let scopeKeys = Set(clusters.flatMap(members))
+        let protectedVMs = inv.vms.filter { $0.isVM && scopeKeys.contains($0.clusterKey) }.count
+        let sspPlan = SSPAppliances.plan(choice: p.choice("ssp"), features: SSPAppliances.Features(rawValue: p.choice("sspFeatures")) ?? .atp,
+                                         requestedWorkers: Int(p.num("sspWorkers")), reservation: p.flag("sspReserve"), vms: protectedVMs)
+        let licenseHub = p.choice("licenseHub") == 1 || (p.choice("licenseHub") == 0 && sspPlan != nil)
+        let security = VCF9Sizing.securityComponents(sspPlan, licenseHub: licenseHub)
+        /// The security VMs go in before anything the user added by hand.
+        func withSecurity(_ c: [Component]) -> [Component] {
+            var c = c
+            c.insert(contentsOf: security, at: c.firstIndex { $0.name == "Other management VMs" } ?? c.endIndex)
+            return c
+        }
+
         /// Appliances and workload domains; a consolidated management cluster isn't a workload domain.
         func components(consolidatedOn mgmtCluster: Cluster?, mgmtHosts: Int) -> ([Component], [WorkloadDomain]) {
             let wds = domains(excluding: mgmtCluster)
@@ -603,9 +739,9 @@ public struct VCF9Sizing: Solution {
             let logs = ["", "Small", "Medium", "Large"][min(p.choice("logs"), 3)]
             if vvf {
                 let services = p.flag("vvfServices")
-                return (VCF9Sizing.vvfComponents(newVCenter: p.choice("vvfVC") == 1, services: services, proxy: p.flag("vvfProxy"),
-                                                 logs: services && !logs.isEmpty ? logs : nil, logReplicas: max(Int(p.num("logReplicas")), 1),
-                                                 extra: A.Spec(p.num("extraCPU"), p.num("extraRAM"), p.num("extraDisk"))), wds)
+                return (withSecurity(VCF9Sizing.vvfComponents(newVCenter: p.choice("vvfVC") == 1, services: services, proxy: p.flag("vvfProxy"),
+                                                              logs: services && !logs.isEmpty ? logs : nil, logReplicas: max(Int(p.num("logReplicas")), 1),
+                                                              extra: A.Spec(p.num("extraCPU"), p.num("extraRAM"), p.num("extraDisk")))), wds)
             }
             let edges = ["", "Small", "Medium", "Large", "XLarge"][min(p.choice("edges"), 4)]
             let comps = VCF9Sizing.managementComponents(
@@ -613,7 +749,7 @@ public struct VCF9Sizing: Solution {
                 logReplicas: max(Int(p.num("logReplicas")), 1), rtm: p.flag("rtm"), edges: edges.isEmpty ? nil : edges, mgmtNSXSize: nsxSize,
                 extra: A.Spec(p.num("extraCPU"), p.num("extraRAM"), p.num("extraDisk")),
                 domains: wds, newVCenters: newVCenters, wldNSXNodes: [3, 1, 0][min(wldNSX, 2)])
-            return (comps, wds)
+            return (withSecurity(comps), wds)
         }
 
         func mgmtDemand(_ comps: [Component]) -> Demand {
@@ -816,6 +952,39 @@ public struct VCF9Sizing: Solution {
         if kind != 3 {
             b.add("mgmt.esa", mgmtArea, "vSAN device eligibility", .info, "The export doesn't list host disks — confirm the management hosts' devices are certified for \(storageName)",
                   remediation: "vSAN ESA needs NVMe devices from the vSAN ESA ReadyNode / compatibility list.")
+        }
+
+        // MARK: vDefend
+        if let sp = sspPlan {
+            let ssp = security.filter { $0.name.hasPrefix("SSP ") }
+            let total = (cpu: ssp.reduce(0) { $0 + $1.cpu }, ram: ssp.reduce(0) { $0 + $1.ram }, disk: ssp.reduce(0) { $0 + $1.disk })
+            let rated = Double(protectedVMs) / Double(sp.form.vmLimit)
+            let fits = SSPAppliances.FormFactor.allCases.first { sp.features.minWorkers($0) != nil && Double(protectedVMs) <= Double($0.vmLimit) * 0.8 }
+            let status: CheckStatus = sp.unsupported || rated > 0.9 ? .blocker : (rated > 0.8 || sp.capped ? .warning : .info)
+            var detail = "\(sp.form.name) with \(sp.workers) workers" + (sp.reservation ? " (+1 for resource reservation)" : "")
+                + " for \(sp.features.short)" + (sp.auto ? ", picked automatically" : "")
+                + ": \(SFmt.num(total.cpu)) vCPU, \(SFmt.num(total.ram)) GB RAM and \(SFmt.num(total.disk)) GB disk in the \(mgmtTerm). "
+                + "\(Fmt.int(protectedVMs)) VMs in scope against the \(Fmt.int(sp.form.vmLimit)) it's rated for (\(Fmt.pct(rated * 100)))"
+            if sp.unsupported { detail += ". \(sp.form.name) doesn't run \(sp.features.short); it runs the firewall features only" }
+            if sp.capped { detail += ". \(sp.form.name) takes at most \(sp.form.workers.upperBound) workers" }
+            var actions: [SolutionAction] = []
+            if sp.unsupported || rated > 0.8, let f = fits, f != sp.form {
+                actions.append(SolutionAction("Use \(f.name)", help: "Sets the SSP form factor to \(f.name).", set: ["ssp": .choice(f.rawValue + 2)]))
+            }
+            b.add("security.ssp", "vDefend", "Security Services Platform", status, detail,
+                  remediation: "Plan one subnet with at least \(SSPAppliances.nodeIPs(workers: sp.workers)) node IPs and \(SSPAppliances.serviceIPs(workers: sp.workers)) service IPs, an IP for the installer, and three FQDNs (installer, SSP, messaging). The SSP needs a distributed port group, shared storage under 10 ms without Storage DRS, and DRS left on. Broadcom warns above 80% of a form factor's rating and blocks Medium and Large above 90%; confirm limits in Configuration Maximums, including how many NSX Managers one SSP serves."
+                      + (vvf ? " vDefend works with NSX, which VVF doesn't deploy: confirm how NSX is provided." : ""),
+                  actions: actions)
+            if !dedicated, chosen.cluster.drsEnabled == false {
+                b.add("security.drs", "vDefend", "DRS for the Security Services Platform", .warning,
+                      "DRS is off on \(chosen.cluster.name), which would run the SSP; it needs DRS on, and turning DRS off later deletes the resource pools it uses for scale-out and upgrades",
+                      remediation: "Enable DRS (any automation level) before deploying the SSP.", affected: [cref(chosen.cluster)])
+            }
+        }
+        if licenseHub {
+            b.add("security.licensehub", "vDefend", "License Hub 2.0", .info,
+                  "One License Hub appliance (\(SFmt.num(SSPAppliances.licenseHub.cpu)) vCPU, \(SFmt.num(SSPAppliances.licenseHub.ram)) GB RAM, \(SFmt.num(SSPAppliances.licenseHub.disk)) GB disk) licenses vDefend and Avi Load Balancer",
+                  remediation: "Plan three IPs (the appliance, and a pool of two contiguous IPs) and two FQDNs (the appliance and Kafka). It's not needed for vDefend 4.2.x or 9.0.x; Avi can use Cloud Licensing instead when it has internet access.")
         }
 
         // MARK: Workload clusters
@@ -1050,7 +1219,8 @@ public struct VCF9Sizing: Solution {
         compRows.append(["Total", "\(comps.reduce(0) { $0 + $1.nodes })", SFmt.num(totCPU), SFmt.num(totRAM), SFmt.num(totDisk), ""])
         sections.append(.table(SolutionTable(
             id: "appliances", title: vvf ? "Management appliances" : "Management domain appliances",
-            subtitle: vvf ? "vSphere Foundation · simple mode, as the VCF Installer deploys it · sizes from the \(A.source)" : "\(deploy.label) · sizes from the \(A.source)",
+            subtitle: (vvf ? "vSphere Foundation · simple mode, as the VCF Installer deploys it · sizes from the \(A.source)" : "\(deploy.label) · sizes from the \(A.source)")
+                + (security.isEmpty ? "" : "; SSP and License Hub from the \(SSPAppliances.source)"),
             columns: ["Component", "Nodes", "vCPU", "RAM (GB)", "Disk (GB)", "Notes"], numeric: [1, 2, 3, 4], rows: compRows, emphasized: [compRows.count - 1])))
 
         // Management hosts.
@@ -1137,14 +1307,17 @@ public struct VCF9Sizing: Solution {
                 ? "Existing workloads are sized from measured host CPU and memory usage, scaled to the selected VMs' share of each cluster's measured VM usage."
                 : "Existing workloads are the selected powered-on VMs at \(SFmt.num(wlRatio)):1 vCPU per core and 1:1 memory."),
             "\(vvf ? "A dedicated cluster" : "Greenfield") assumes the other hosts in the cluster can take its VMs (vMotion / DRS) before hosts are removed for the \(mgmtTerm).",
-            vvf ? "Not in this sizing: Supervisor, Avi, Live Recovery and Site Recovery Manager — add them as Other management VMs."
-                : "Not in this sizing: Supervisor, Avi, Security Services Platform, VCF Operations for networks and Live Recovery — add them as Other management VMs.",
+            vvf ? "Not in this sizing: Supervisor, Avi Load Balancer controllers, Live Recovery and Site Recovery Manager — add them as Other management VMs."
+                : "Not in this sizing: Supervisor, Avi Load Balancer controllers, VCF Operations for networks and Live Recovery — add them as Other management VMs." + (sspPlan == nil ? " The vDefend Security Services Platform and License Hub are options under Assumptions." : ""),
             "vSAN entitlement: \(SFmt.num(tibPerCore)) TiB of raw vSAN per licensed core (\(SFmt.num(coreMin))-core minimum per CPU), compared with the raw capacity of today's vSAN datastores in scope. Disks in new hosts aren't in the export.",
         ]
         if vvf && !dedicated, let plan = bestPeel.peel {
             notes.append("A dedicated management cluster is still recommended for VVF where hosts can be spared. " + (plan.newHosts == 0
                 ? "\(bestPeel.cluster.name) could give up \(plan.mgmt.count) hosts for one and still carry its workloads at \(Fmt.pct(plan.remainingLoad * 100)) with \(spare) down."
                 : "Here it would need \(plan.newHosts) new host(s)."))
+        }
+        if let sp = sspPlan {
+            notes.append("Security Services Platform sizes follow Broadcom's SSP 5.2 system requirements: an installer VM (4 vCPU, 6 GB, 400 GB), 3 controllers (4 vCPU, 8 GB, 75 GB each) and \(sp.form.name)'s workers (16 vCPU, 64 GB, 155 GB each), plus persistent volumes, a 50 GB content library and one worker held back for upgrades. Worker counts come from Broadcom's Security Features Form Factor table. It's sized as one SSP instance in the \(mgmtTerm); SSP and its installer can share a cluster or use different ones.")
         }
         if !pairs.isEmpty {
             notes.append("HA cluster pairs are sized so either site can carry both clusters' workloads alone, at most \(SFmt.num(maxLoad * 100))%, with \(siteSpare) more host(s) out on that site. Other clusters still keep \(spare) host(s) in reserve.")
