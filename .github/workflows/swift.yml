@@ -20,3 +20,5 @@ jobs:
       run: swift build
     - name: Smoke test the CLI on a sample export
       run: swift run rvtools-cli samples/RVTools_export_all_2026-09-01_09.30.00.xlsx
+    - name: Run tests
+      run: swift test
