@@ -57,42 +57,54 @@ enum DebugSnapshot {
                 ("11-correlations", { model.sidebar = .correlations }),
                 ("12-raw", { model.sidebar = .rawData }),
                 ("13-overview-again", { model.sidebar = .overview }),
-            ] + SolutionCatalog.all.enumerated().flatMap { i, s -> [(String, () -> Void)] in
+            ]
+            let solutionSteps: [(String, () -> Void)] = SolutionCatalog.all.enumerated().flatMap { i, s in
                 [("\(20 + i * 3)-\(s.id)-select", { model.solutionTab[s.id] = 0; model.sidebar = .solution(s) }),
                  ("\(21 + i * 3)-\(s.id)-assumptions", { model.solutionTab[s.id] = 1; model.sidebar = .solution(s) }),
                  ("\(22 + i * 3)-\(s.id)-results", { model.solutionTab[s.id] = 2; model.sidebar = .solution(s) })]
-            } + (SolutionCatalog.solution(id: "vcfsizing").map { s -> [(String, () -> Void)] in
+            }
+            steps.append(contentsOf: solutionSteps)
+
+            if let s = SolutionCatalog.solution(id: "vcfsizing") {
                 // VCF 9 Sizing again with the vSphere Foundation edition, then back to its defaults.
-                [("60-vcfsizing-vvf-results", {
-                    model.solutionParams[s.id, default: ParamValues()].values["edition"] = .choice(1)
-                    model.solutionTab[s.id] = 2
-                    model.sidebar = .solution(s)
-                 }),
-                 ("61-vcfsizing-reset", { model.solutionParams[s.id]?.values["edition"] = nil; model.sidebar = .overview })]
-            } ?? []) + (SolutionCatalog.solution(id: "consolidation").map { s -> [(String, () -> Void)] in
+                let vcfSizingSteps: [(String, () -> Void)] = [
+                    ("60-vcfsizing-vvf-results", {
+                        model.solutionParams[s.id, default: ParamValues()].values["edition"] = .choice(1)
+                        model.solutionTab[s.id] = 2
+                        model.sidebar = .solution(s)
+                    }),
+                    ("61-vcfsizing-reset", { model.solutionParams[s.id]?.values["edition"] = nil; model.sidebar = .overview })
+                ]
+                steps.append(contentsOf: vcfSizingSteps)
+            }
+
+            if let s = SolutionCatalog.solution(id: "consolidation") {
                 // Workload Consolidation with an override of each kind, on the export's first clusters.
                 let ids = (inv?.clusters ?? []).filter { !$0.isStandalone && $0.hostCount > 0 }.map(\.id)
-                return [("62-consolidation-overrides-assumptions", {
-                    guard ids.count > 1 else { return }
-                    var v = model.solutionParams[s.id, default: ParamValues()]
-                    v.values["merge"] = .names([PlanEntry.join([ids[0], ids[1]])])
-                    v.values["ram"] = .names([PlanEntry.join([ids[0], "1024"])])
-                    v.values["moves"] = .names([PlanEntry.join([ids[1], HostMove.all, HostMove.keep])])
-                    v.values["approach"] = .choice(1)
-                    v.values["retire"] = .names(Array((inv?.hosts ?? []).filter { $0.clusterKey == ids[0] }.prefix(1).map(\.id)))
-                    model.solutionParams[s.id] = v
-                    model.solutionTab[s.id] = 1
-                    model.sidebar = .solution(s)
-                 }),
-                 ("63-consolidation-overrides-results", { model.solutionTab[s.id] = 2; model.sidebar = .solution(s) }),
-                 ("64-consolidation-reset", {
-                    for k in ["merge", "ram", "moves", "approach", "retire"] { model.solutionParams[s.id]?.values[k] = nil }
-                    model.sidebar = .overview
-                 })]
-            } ?? [])
+                let consolidationSteps: [(String, () -> Void)] = [
+                    ("62-consolidation-overrides-assumptions", {
+                        guard ids.count > 1 else { return }
+                        var v = model.solutionParams[s.id, default: ParamValues()]
+                        v.values["merge"] = .names([PlanEntry.join([ids[0], ids[1]])])
+                        v.values["ram"] = .names([PlanEntry.join([ids[0], "1024"])])
+                        v.values["moves"] = .names([PlanEntry.join([ids[1], HostMove.all, HostMove.keep])])
+                        v.values["approach"] = .choice(1)
+                        v.values["retire"] = .names(Array((inv?.hosts ?? []).filter { $0.clusterKey == ids[0] }.prefix(1).map(\.id)))
+                        model.solutionParams[s.id] = v
+                        model.solutionTab[s.id] = 1
+                        model.sidebar = .solution(s)
+                    }),
+                    ("63-consolidation-overrides-results", { model.solutionTab[s.id] = 2; model.sidebar = .solution(s) }),
+                    ("64-consolidation-reset", {
+                        for k in ["merge", "ram", "moves", "approach", "retire"] { model.solutionParams[s.id]?.values[k] = nil }
+                        model.sidebar = .overview
+                    })
+                ]
+                steps.append(contentsOf: consolidationSteps)
+            }
             if let trend = model.trend {
                 let resized = trend.changes.first { $0.kind == .resized }?.key
-                steps = [
+                var trendSteps: [(String, () -> Void)] = [
                     ("30-trend-summary", { model.sidebar = .trendSummary }),
                     ("31-trend-changes", { model.trendChangesTab = 0; model.sidebar = .trendChanges }),
                     ("32-trend-vm-history", { model.trendVMKey = resized; model.sidebar = .trendChanges }),
@@ -106,9 +118,16 @@ enum DebugSnapshot {
                         model.solutionTab["backup"] = 1
                         if let backup = SolutionCatalog.solution(id: "backup") { model.sidebar = .solution(backup) }
                     }),
-                ] + SolutionCatalog.custom.filter { $0.parameters.contains { $0.observed != nil } }.enumerated().map { i, s in
+                ]
+                let observedCustomSolutionSteps: [(String, () -> Void)] =
+                    SolutionCatalog.custom
+                        .filter { $0.parameters.contains { $0.observed != nil } }
+                        .enumerated()
+                        .map { i, s in
                     ("\(39 + i)-\(s.id)-assumptions", { model.solutionTab[s.id] = 1; model.sidebar = .solution(s) })
                 }
+                trendSteps.append(contentsOf: observedCustomSolutionSteps)
+                steps = trendSteps
             }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             for (name, setup) in steps {
