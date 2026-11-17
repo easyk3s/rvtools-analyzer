@@ -103,7 +103,7 @@ struct SolutionView: View {
                 .menuStyle(.borderedButton).fixedSize()
                 .help("Export the report as Markdown and CSV, or pick PowerPoint from the menu")
                 .disabled(inScope == 0)
-                .sheet(isPresented: $showDeckSheet) { DeckExportSheet(solution: solution, result: model.result(for: solution)).environment(model) }
+                .sheet(isPresented: $showDeckSheet) { DeckExportSheet(solution: solution).environment(model) }
                 if let custom = solution as? ScriptedSolution { CustomSolutionMenu(solution: custom) }
             }
             .padding(.horizontal, 20).padding(.vertical, 12)
@@ -1120,7 +1120,9 @@ struct DeckExportSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let solution: any Solution
-    let result: SolutionResult?
+    /// The result the choices below are built from. A custom solution's result arrives from a background run, so the sheet
+    /// can open before it exists; it fills in when the run finishes.
+    @State private var result: SolutionResult?
     @State private var title = ""
     @State private var subtitle = ""
     @State private var date = ""
@@ -1157,6 +1159,12 @@ struct DeckExportSheet: View {
                     TextField("Date line", text: $date)
                 }
                 Section("Content") {
+                    if result == nil {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Running \(solution.title)…").foregroundStyle(.secondary)
+                        }
+                    }
                     if let result, !result.headline.isEmpty {
                         Toggle("Include the headline", isOn: $includeHeadline)
                     }
@@ -1228,6 +1236,7 @@ struct DeckExportSheet: View {
                     DispatchQueue.main.async { model.exportDeck(solution, options) }
                 }
                 .keyboardShortcut(.defaultAction)
+                .disabled(result == nil)
             }
         }
         .padding(20)
@@ -1235,12 +1244,18 @@ struct DeckExportSheet: View {
         .onAppear {
             let defaults = model.deckDefaults(solution)
             title = solution.title; subtitle = defaults.subtitle; date = defaults.date
-            if let result {
-                selectedSectionIndices = Set(result.sections.indices)
-                includeHeadline = !result.headline.isEmpty
-                selectedCheckAreas = Set(checkAreas)
-            }
+            loadResult()
         }
+        .onChange(of: model.scriptRunVersion) { loadResult() }
+    }
+
+    /// Takes the current result once it exists (starting a custom solution's run if needed) and selects everything in it.
+    private func loadResult() {
+        guard result == nil, let current = model.result(for: solution) else { return }
+        result = current
+        selectedSectionIndices = Set(current.sections.indices)
+        includeHeadline = !current.headline.isEmpty
+        selectedCheckAreas = Set(checkAreas)
     }
 
     private func checkAreaBinding(_ area: String) -> Binding<Bool> {
